@@ -84,13 +84,13 @@ class JAIson(metaclass=Singleton):
         self.job_queue = asyncio.Queue()
         self.job_map = dict()
         self.job_skips = dict()
-        self.job_loop = asyncio.create_task(self._process_job_loop())
-        
+
+        # Initialize dependencies before starting the job loop
         self.event_server = ObserverServer()
-        
+
         self.prompter = Prompter()
         await self.prompter.configure(Config().prompter)
-        
+
         self.process_manager = ProcessManager()
         self.op_manager = OperationManager()
         self.mcp_manager = MCPManager()
@@ -98,13 +98,29 @@ class JAIson(metaclass=Singleton):
         self.prompter.add_mcp_usage_prompt(self.mcp_manager.get_tooling_prompt(), self.mcp_manager.get_response_prompt())
         await self.op_manager.load_operations_from_config()
         await self.process_manager.reload()
+
+        # Start job processing loop after managers are ready
+        self.job_loop = asyncio.create_task(self._process_job_loop())
         logging.info("JAIson application layer has started.")
         
     async def stop(self):
         logging.info("Shutting down JAIson application layer")
-        await self.op_manager.close_operation_all()
-        await self.mcp_manager.close()
-        await self.process_manager.unload()
+        # Cancel current job loop gracefully
+        if self.job_loop is not None:
+            self.job_loop.cancel("Application shutdown")
+            try:
+                await self.job_loop
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self.job_loop = None
+
+        if self.op_manager is not None:
+            await self.op_manager.close_operation_all()
+        if self.mcp_manager is not None:
+            await self.mcp_manager.close()
+        if self.process_manager is not None:
+            await self.process_manager.unload()
         logging.info("JAIson application layer has been shut down")
     
     ## Job Queueing #########################
@@ -172,8 +188,13 @@ class JAIson(metaclass=Singleton):
     async def _process_job_loop(self):
         while True:
             try:
-                await self.process_manager.reload()
-                await self.process_manager.unload()
+                # Guard against early loop start before managers are ready
+                if self.process_manager is not None:
+                    await self.process_manager.reload()
+                    await self.process_manager.unload()
+                else:
+                    await asyncio.sleep(0.05)
+                    continue
                 
                 self.job_current_id = await self.job_queue.get()
                 job_type, coro = self.job_map[self.job_current_id]
