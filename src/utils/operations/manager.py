@@ -119,6 +119,9 @@ def load_op(op_type: OpTypes, op_id: str):
             elif op_id == "filter_clean":
                 from .filter_text.filter_clean import ResponseCleaningFilter
                 return ResponseCleaningFilter()
+            elif op_id == "style_preserver":
+                from .filter_text.style_preserver import StylePreserverFilter
+                return StylePreserverFilter()
             else:
                 raise UnknownOpID("FILTER_TEXT", op_id)
         case OpTypes.EMBEDDING:

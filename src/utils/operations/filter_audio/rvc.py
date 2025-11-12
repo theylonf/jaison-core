@@ -86,10 +86,15 @@ class RVCFilter(FilterAudioOperation):
             protect=self.protect,
         )
         
-        yield {
+        output = {
             "audio_bytes": audio_opt.tobytes(),
             "sr": tgt_sr,
             "sw": self.TARGET_SW,
             "ch": self.TARGET_CH
         }
+        # Preserve extra fields (like "emotion" for VTube Studio)
+        for key, value in kwargs.items():
+            if key not in output:
+                output[key] = value
+        yield output
     

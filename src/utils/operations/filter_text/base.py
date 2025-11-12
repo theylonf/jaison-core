@@ -29,9 +29,16 @@ class FilterTextOperation(Operation):
         assert isinstance(chunk_in["content"], str)
         assert len(chunk_in["content"]) > 0
         
-        return {
+        # Preserve content and any extra fields (like "emotion", "detected_style" for VTube Studio)
+        parsed = {
             "content": chunk_in["content"]
         }
+        # Preserve extra fields that might be needed downstream
+        for key in chunk_in:
+            if key not in parsed:
+                parsed[key] = chunk_in[key]
+        
+        return parsed
     
     ## TO BE IMPLEMENTED ####
     async def configure(self, config_d: Dict[str, Any]):

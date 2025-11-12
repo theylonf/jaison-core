@@ -58,3 +58,4 @@ PLUGIN_DIR = REPO_ROOT.parent / "VTube studio" / "app-jaison-vts-hotkeys-lcc"
 
 
 
+

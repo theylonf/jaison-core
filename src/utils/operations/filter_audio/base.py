@@ -44,12 +44,19 @@ class FilterAudioOperation(Operation):
         assert isinstance(chunk_in["ch"], int)
         assert chunk_in["ch"] > 0
         
-        return {
+        # Preserve audio fields and any extra fields (like "emotion" for VTube Studio)
+        parsed = {
             "audio_bytes": chunk_in["audio_bytes"],
             "sr": chunk_in["sr"],
             "sw": chunk_in["sw"],
             "ch": chunk_in["ch"]
         }
+        # Preserve extra fields that might be needed downstream (e.g., emotion for VTS)
+        for key in chunk_in:
+            if key not in parsed:
+                parsed[key] = chunk_in[key]
+        
+        return parsed
     
     ## TO BE IMPLEMENTED ####
     async def configure(self, config_d: Dict[str, Any]):

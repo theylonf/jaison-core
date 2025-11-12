@@ -25,7 +25,8 @@ class AzureSTT(STTOperation):
         
     async def configure(self, config_d):
         '''Configure and validate operation-specific configuration'''
-        if "language" in config_d: self.model_id = str(config_d["language"])
+        if "language" in config_d: 
+            self.language = str(config_d["language"])
 
         assert self.language is not None and len(self.language) > 0
     
@@ -57,7 +58,9 @@ class AzureSTT(STTOperation):
         def transcribed_cb(evt):
             nonlocal transcription
             if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                transcription += str(evt.result)
+                # Extract only the text, not the full object representation
+                if hasattr(evt.result, 'text') and evt.result.text:
+                    transcription += evt.result.text + " "
         
         def stop_cb(evt: speechsdk.SessionEventArgs):
             done.set()

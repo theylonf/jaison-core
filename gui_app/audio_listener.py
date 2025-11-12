@@ -8,7 +8,7 @@ class AudioListener(QtCore.QThread):
     audio_received = QtCore.Signal(bytes, int, int, int)  # audio_bytes, sr, sw, ch
     audio_chunk_received = QtCore.Signal(str, int, int, int)  # audio_b64_chunk, sr, sw, ch
     audio_complete = QtCore.Signal(int, int, int)  # sr, sw, ch - signal when all chunks received
-    text_received = QtCore.Signal(str)
+    text_received = QtCore.Signal(str, str)  # text, user_name
     error_received = QtCore.Signal(str)  # error message
 
     def __init__(self, ws_url: str):
@@ -105,28 +105,31 @@ class AudioListener(QtCore.QThread):
                             if isinstance(result, dict):
                                 # Check for content in result
                                 content = result.get("content", "")
+                                user_name = result.get("user", "")  # Get user name from result
                                 if content and content.strip():
                                     print(f"[WebSocket] Texto detectado em result.content: {content[:100]}...")
-                                    self.text_received.emit(content)
+                                    self.text_received.emit(content, user_name)
                                 # Also check raw_content
                                 raw_content = result.get("raw_content", "")
                                 if raw_content and raw_content.strip() and not content:
                                     print(f"[WebSocket] Texto detectado em result.raw_content: {raw_content[:100]}...")
-                                    self.text_received.emit(raw_content)
+                                    self.text_received.emit(raw_content, user_name)
                             
                             # Check for content directly in response (alternative format)
                             if "content" in response and not isinstance(response["content"], dict):
                                 content = response["content"]
+                                user_name = response.get("user", "")
                                 if content and content.strip():
                                     print(f"[WebSocket] Texto detectado em response.content: {content[:100]}...")
-                                    self.text_received.emit(content)
+                                    self.text_received.emit(content, user_name)
                             
                             # Check for raw_content directly in response
                             if "raw_content" in response:
                                 raw_content = response["raw_content"]
+                                user_name = response.get("user", "")
                                 if raw_content and raw_content.strip():
                                     print(f"[WebSocket] Texto detectado em response.raw_content: {raw_content[:100]}...")
-                                    self.text_received.emit(raw_content)
+                                    self.text_received.emit(raw_content, user_name)
                             
                             # Check for errors in response
                             if response.get("success") == False or response.get("error"):

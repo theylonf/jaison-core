@@ -16,8 +16,10 @@ class AudioLevelWithThreshold(QtWidgets.QWidget):
     
     def set_level(self, value):
         """Set the current audio level."""
-        self.level_value = min(value, self.max_value)
-        self.update()
+        new_value = min(value, self.max_value)
+        if new_value != self.level_value:  # Only update if value changed
+            self.level_value = new_value
+            self.update()  # Trigger repaint
     
     def set_threshold(self, value):
         """Set the threshold value."""

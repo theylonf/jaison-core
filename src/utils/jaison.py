@@ -286,22 +286,53 @@ class JAIson(metaclass=Singleton):
         await self._handle_broadcast_event(job_id, job_type, {"raw_content": t2t_result})
 
         # Apply text filters
+        # Acumula todo o texto filtrado antes de adicionar ao histórico
+        # Isso evita que cada sentença do chunker_sentence seja adicionada separadamente
+        full_response_text = ""
+        text_chunks = []
+        
         async for text_chunk_out in self.op_manager.use_operation(OpRoles.FILTER_TEXT, {"content": t2t_result}):
-            self.prompter.add_chat(self.prompter.character_name, text_chunk_out['content'])
-            await self._handle_broadcast_event(job_id, job_type, text_chunk_out)
-            if include_audio:
+            text_chunks.append(text_chunk_out)
+            # Acumula texto para histórico completo
+            if text_chunk_out.get('content'):
+                if full_response_text:
+                    full_response_text += " " + text_chunk_out['content']
+                else:
+                    full_response_text = text_chunk_out['content']
+            # Add character name to broadcast for proper display in chat
+            broadcast_chunk = text_chunk_out.copy()
+            broadcast_chunk['user'] = self.prompter.character_name
+            await self._handle_broadcast_event(job_id, job_type, broadcast_chunk)
+        
+        # Adiciona mensagem completa ao histórico apenas uma vez
+        if full_response_text.strip():
+            self.prompter.add_chat(self.prompter.character_name, full_response_text.strip())
+        
+        # Processa TTS para cada chunk (para manter processamento em sentenças)
+        if include_audio:
+            for text_chunk_out in text_chunks:
                 # Apply tts
                 async for audio_chunk_out in self.op_manager.use_operation(OpRoles.TTS, text_chunk_out):
                     # Apply tts filters
                     async for final_audio_chunk_out in self.op_manager.use_operation(OpRoles.FILTER_AUDIO, audio_chunk_out):
-                        # Broadcast results (only the audio data for now)
+                        # Broadcast results (audio data and emotion if present)
+                        broadcast_data = {
+                            "audio_bytes": None,  # Will be set in loop
+                            "sr": final_audio_chunk_out['sr'],
+                            "sw": final_audio_chunk_out['sw'],
+                            "ch": final_audio_chunk_out['ch']
+                        }
+                        # Include emotion if present (for VTube Studio integration)
+                        if "emotion" in final_audio_chunk_out:
+                            broadcast_data["emotion"] = final_audio_chunk_out["emotion"]
+                        # Also check if emotion came from TTS
+                        if "emotion" in audio_chunk_out and "emotion" not in broadcast_data:
+                            broadcast_data["emotion"] = audio_chunk_out["emotion"]
+                        
                         for ws_chunk in chunk_buffer(base64.b64encode(final_audio_chunk_out['audio_bytes']).decode('utf-8')):
-                            await self._handle_broadcast_event(job_id, job_type, {
-                                "audio_bytes": ws_chunk,
-                                "sr": final_audio_chunk_out['sr'],
-                                "sw": final_audio_chunk_out['sw'],
-                                "ch": final_audio_chunk_out['ch']
-                            })
+                            chunk_broadcast = broadcast_data.copy()
+                            chunk_broadcast["audio_bytes"] = ws_chunk
+                            await self._handle_broadcast_event(job_id, job_type, chunk_broadcast)
                         
         # Broadcast completion
         await self._handle_broadcast_success(job_id, job_type)
@@ -383,12 +414,14 @@ class JAIson(metaclass=Singleton):
             )
         )
         last_line_o = self.prompter.history[-1]
-        await self._handle_broadcast_event(job_id, job_type, {
-            "user": last_line_o.user,
-            "timestamp": last_line_o.time.timestamp(),
-            "content": last_line_o.message,
-            "line": last_line_o.to_line()
-        })
+        # Não faz broadcast do evento para evitar duplicação no cliente
+        # O cliente já mostra a mensagem quando envia, não precisa mostrar novamente
+        # await self._handle_broadcast_event(job_id, job_type, {
+        #     "user": last_line_o.user,
+        #     "timestamp": last_line_o.time.timestamp(),
+        #     "content": last_line_o.message,
+        #     "line": last_line_o.to_line()
+        # })
         await self._handle_broadcast_success(job_id, job_type)
         
     async def append_conversation_context_audio(
@@ -407,23 +440,39 @@ class JAIson(metaclass=Singleton):
         prompt = self.prompter.get_history_text() or "You're name is {}".format(self.prompter.character_name)
         content = ""
         async for out_d in self.op_manager.use_operation(OpRoles.STT, {"prompt": prompt, "audio_bytes": audio_bytes, "sr": sr, "sw": sw, "ch": ch}):
-            content += out_d['transcription']
+            transcription = out_d.get('transcription', '')
+            if transcription:
+                content += transcription
       
-        self.prompter.add_chat(
-            user,
-            content,
-            time=(
-                datetime.datetime.fromtimestamp(timestamp) \
-                if isinstance(timestamp, int) else timestamp
+        # Only add to chat if content is not empty after stripping whitespace
+        content = content.strip()
+        if content:
+            self.prompter.add_chat(
+                user,
+                content,
+                time=(
+                    datetime.datetime.fromtimestamp(timestamp) \
+                    if isinstance(timestamp, int) else timestamp
+                )
             )
-        )
-        last_line_o = self.prompter.history[-1]
-        await self._handle_broadcast_event(job_id, job_type, {
-            "user": last_line_o.user,
-            "timestamp": last_line_o.time.timestamp(),
-            "content": last_line_o.message,
-            "line": last_line_o.to_line()
-        })
+            last_line_o = self.prompter.history[-1]
+            await self._handle_broadcast_event(job_id, job_type, {
+                "user": last_line_o.user,
+                "timestamp": last_line_o.time.timestamp(),
+                "content": last_line_o.message,
+                "line": last_line_o.to_line()
+            })
+        else:
+            # Log warning but don't fail - empty transcription is valid (silence, noise, etc.)
+            logging.warning(f"STT returned empty transcription for audio from user {user}")
+            # Broadcast empty content event but mark as success (not an error)
+            await self._handle_broadcast_event(job_id, job_type, {
+                "user": user,
+                "timestamp": timestamp if isinstance(timestamp, int) else timestamp.timestamp() if hasattr(timestamp, 'timestamp') else datetime.datetime.now().timestamp(),
+                "content": "",
+                "line": f"[{user}]: (áudio sem transcrição)"
+            })
+        
         await self._handle_broadcast_success(job_id, job_type)
         
     async def register_custom_context(

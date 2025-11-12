@@ -21,10 +21,15 @@ class PitchFilter(FilterAudioOperation):
 
     async def _generate(self, audio_bytes: bytes = None, sr: int = None, sw: int = None, ch: int = None, **kwargs):
         ab, sr, sw, ch = pitch_audio(audio_bytes, sr, sw, ch, self.pitch_amount)
-        yield {
+        output = {
             "audio_bytes": ab,
             "sr": sr,
             "sw": sw,
             "ch": ch
         }
+        # Preserve extra fields (like "emotion" for VTube Studio)
+        for key, value in kwargs.items():
+            if key not in output:
+                output[key] = value
+        yield output
     

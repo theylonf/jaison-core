@@ -28,8 +28,22 @@ except ImportError:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    # Signals for thread-safe communication from audio callback
+    rms_update_signal = QtCore.Signal(int, int)  # rms_value, threshold
+    voice_detected_signal = QtCore.Signal()
+    silence_detected_signal = QtCore.Signal()
+    auto_send_triggered_signal = QtCore.Signal()
+    request_response_signal = QtCore.Signal()  # Request AI response
+    
     def __init__(self):
         super().__init__()
+        
+        # Connect signals to slots
+        self.rms_update_signal.connect(self._update_audio_level)
+        self.voice_detected_signal.connect(self._on_voice_detected)
+        self.silence_detected_signal.connect(self._on_silence_detected)
+        self.auto_send_triggered_signal.connect(self._auto_send_phrase)
+        self.request_response_signal.connect(self._request_response)
         self.setWindowTitle("JAIson - Launcher & Chat")
         self.resize(900, 650)
 
@@ -59,7 +73,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.silence_start_time = None
         self.voice_threshold = 500  # RMS threshold for voice detection
         self.silence_duration = 1.5  # seconds of silence before auto-send
+        self._auto_send_scheduled = False  # Flag to prevent multiple auto-sends
         self.continuous_stream = None
+        self._was_listening_before_playback = False  # Track if listener was active before playback
+        self.is_playing_ai_audio = False  # Track if AI audio is currently playing
         
         # Store last received audio from AI
         self.last_ai_audio = None
@@ -592,14 +609,37 @@ class MainWindow(QtWidgets.QMainWindow):
             # Play audio in a separate thread to avoid blocking
             def play_thread():
                 try:
+                    # Pause listener if it's active to avoid capturing AI's own audio
+                    # Only set flag if it's not already set (from user audio send)
+                    if not self._was_listening_before_playback:
+                        self._was_listening_before_playback = self.is_listening_continuously
+                    if self.is_listening_continuously:
+                        print("[Audio] 🔇 Pausando listener durante reprodução do áudio da IA...")
+                        self.is_playing_ai_audio = True
+                        # Temporarily disable listener (only if not already paused)
+                        if self.continuous_stream:
+                            self._pause_listener()
+                    
                     # Use specified device or default
                     if self.audio_output_device is not None:
                         sd.play(audio_array, samplerate=sr, device=self.audio_output_device)
                     else:
                         sd.play(audio_array, samplerate=sr)
                     sd.wait()  # Wait for playback to finish
+                    
+                    # Re-enable listener if it was active before (either from user audio send or AI playback)
+                    if self._was_listening_before_playback:
+                        print("[Audio] 🎤 Reativando listener após reprodução do áudio da IA...")
+                        self.is_playing_ai_audio = False
+                        self._resume_listener()
+                        # Reset flag after resuming
+                        self._was_listening_before_playback = False
                 except Exception as e:
                     print(f"Erro ao reproduzir audio: {e}")
+                    # Make sure to re-enable listener even if there's an error
+                    if self._was_listening_before_playback:
+                        self.is_playing_ai_audio = False
+                        self._resume_listener()
             
             threading.Thread(target=play_thread, daemon=True).start()
         except Exception as e:
@@ -778,10 +818,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chat_history.appendPlainText("Dispositivo de entrada resetado para padrão do sistema")
         dialog.accept()
     
-    def _on_received_text(self, text: str):
+    def _on_received_text(self, text: str, user_name: str = ""):
         """Handle text received from server."""
         if text.strip():
-            self.chat_history.appendPlainText(f"Aeliana: {text}")
+            # Use user_name from server if provided, otherwise try to get from prompter
+            character_name = user_name
+            if not character_name:
+                # Try to get from prompter if available
+                try:
+                    from utils.prompter.prompter import Prompter
+                    prompter = Prompter()
+                    if prompter.character_name:
+                        character_name = prompter.character_name
+                except:
+                    # Fallback to config name or default
+                    character_name = self.config_name.text().strip() if hasattr(self, 'config_name') else "Ana"
+            if not character_name:
+                character_name = "Ana"  # Final fallback
+            self.chat_history.appendPlainText(f"{character_name}: {text}")
             self._append_server_log(f"Texto recebido da IA: {text[:100]}...")
             
             # Extract emotions between [] and send to plugin
@@ -809,6 +863,12 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"[WebSocket] {error_display}")
         self.chat_history.appendPlainText(error_display)
         self._append_server_log(f"Erro recebido via WebSocket: {error_msg}")
+        
+        # Re-enable listener if it was paused (error case - no response will come)
+        if self._was_listening_before_playback:
+            print("[VAD] 🔄 Reativando listener após erro do servidor...")
+            self._was_listening_before_playback = False
+            self._resume_listener()
         
         # Check if it's an API key error
         if "API key" in error_msg or "401" in error_msg or "authentication" in error_msg.lower():
@@ -951,7 +1011,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.is_recording:
                 self.btn_record_audio.setChecked(False)
                 self._stop_recording()
-            self._start_continuous_listening()
+            # Ensure listener is fully stopped before starting again
+            if self.is_listening_continuously:
+                self._stop_continuous_listening()
+                # Schedule start after a short delay to ensure cleanup is complete
+                QtCore.QTimer.singleShot(300, self._start_continuous_listening)
+            else:
+                self._start_continuous_listening()
         else:
             self._stop_continuous_listening()
     
@@ -1013,11 +1079,27 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _start_continuous_listening(self):
         """Start continuous listening with voice activity detection."""
+        # First, ensure any existing stream is properly closed
+        if self.continuous_stream:
+            try:
+                self.continuous_stream.close()
+            except:
+                pass
+            self.continuous_stream = None
+        
+        # Reset all flags and state
         self.is_listening_continuously = True
         self.current_phrase_audio = []
         self.is_speaking = False
         self.silence_start_time = None
+        self._auto_send_scheduled = False
+        self._was_listening_before_playback = False
+        self.is_playing_ai_audio = False
         self._callback_logged = False  # Reset callback log flag
+        self._last_rms_log_time = 0  # Reset RMS log timer
+        self._last_silence_log = -1  # Reset silence log counter
+        
+        # Update UI
         self.btn_listen_continuous.setText("👂 Escuta Ativa")
         self.btn_listen_continuous.setChecked(True)
         self.btn_stop_listening.setEnabled(True)
@@ -1045,12 +1127,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(f"[VAD] Dispositivo padrão de entrada: {default_input['name']}")
                 
                 # Use specified input device or default
+                # Use float32 for better RMS calculation (normalized -1.0 to 1.0)
                 if self.audio_input_device is not None:
                     print(f"[VAD] Usando dispositivo de entrada {self.audio_input_device}")
                     self.continuous_stream = sd.InputStream(
                         samplerate=self.sample_rate, 
                         channels=1, 
-                        dtype=np.int16, 
+                        dtype=np.float32,  # Use float32 for normalized audio
                         callback=self._audio_callback,
                         blocksize=1024,
                         device=self.audio_input_device
@@ -1060,7 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.continuous_stream = sd.InputStream(
                         samplerate=self.sample_rate, 
                         channels=1, 
-                        dtype=np.int16, 
+                        dtype=np.float32,  # Use float32 for normalized audio
                         callback=self._audio_callback,
                         blocksize=1024
                     )
@@ -1083,12 +1166,106 @@ class MainWindow(QtWidgets.QMainWindow):
         
         threading.Thread(target=listen_thread, daemon=True).start()
     
+    def _pause_listener(self):
+        """Temporarily pause the listener without fully stopping it."""
+        if not self.is_listening_continuously:
+            return
+        
+        # Close the stream but keep the flag set so we can resume
+        if self.continuous_stream:
+            try:
+                self.continuous_stream.close()
+            except:
+                pass
+            self.continuous_stream = None
+        
+        # Clear current phrase to avoid sending partial audio
+        self.current_phrase_audio = []
+        self.is_speaking = False
+        self.silence_start_time = None
+        self._auto_send_scheduled = False
+    
+    def _resume_listener(self):
+        """Resume the listener after it was paused."""
+        if not self._was_listening_before_playback:
+            return
+        
+        # Restart the stream if listener should be active
+        if self.is_listening_continuously and not self.continuous_stream:
+            def listen_thread():
+                try:
+                    print(f"[VAD] Iniciando stream de áudio (sr={self.sample_rate}, channels=1)")
+                    print(f"[VAD] Verificando dispositivos de entrada disponíveis...")
+                    devices = sd.query_devices()
+                    default_input = sd.query_devices(kind='input')
+                    print(f"[VAD] Dispositivo padrão de entrada: {default_input['name']}")
+                    
+                    # Use specified input device or default
+                    # Use float32 for better RMS calculation (normalized -1.0 to 1.0)
+                    if self.audio_input_device is not None:
+                        print(f"[VAD] Usando dispositivo de entrada {self.audio_input_device}")
+                        self.continuous_stream = sd.InputStream(
+                            samplerate=self.sample_rate, 
+                            channels=1, 
+                            dtype=np.float32,  # Use float32 for normalized audio
+                            callback=self._audio_callback,
+                            blocksize=1024,
+                            device=self.audio_input_device
+                        )
+                    else:
+                        print(f"[VAD] Usando dispositivo de entrada padrão")
+                        self.continuous_stream = sd.InputStream(
+                            samplerate=self.sample_rate, 
+                            channels=1, 
+                            dtype=np.float32,  # Use float32 for normalized audio
+                            callback=self._audio_callback,
+                            blocksize=1024
+                        )
+                    print(f"[VAD] Stream criado, iniciando captura...")
+                    with self.continuous_stream:
+                        print(f"[VAD] ✅ Stream ativo! Callback deve ser chamado agora.")
+                        callback_count = 0
+                        while self.is_listening_continuously:
+                            time.sleep(0.1)
+                            # Log every 5 seconds to confirm it's running
+                            callback_count += 1
+                            if callback_count % 50 == 0:  # ~5 seconds
+                                print(f"[VAD] Stream ainda ativo (aguardando callback)...")
+                except Exception as e:
+                    error_msg = f"Erro na escuta: {e}"
+                    print(f"[VAD] ❌ {error_msg}")
+                    import traceback
+                    traceback.print_exc()
+                    QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText(error_msg))
+            
+            threading.Thread(target=listen_thread, daemon=True).start()
+    
     def _stop_continuous_listening(self):
         """Stop continuous listening."""
+        # Set flag first to stop the loop in listen_thread
         self.is_listening_continuously = False
+        
+        # Reset all flags and state
+        self._was_listening_before_playback = False
+        self.is_playing_ai_audio = False
         self.is_speaking = False
         self.current_phrase_audio = []
         self.silence_start_time = None
+        self._auto_send_scheduled = False
+        self._callback_logged = False
+        self._last_rms_log_time = 0
+        self._last_silence_log = -1
+        
+        # Close stream if it exists
+        if self.continuous_stream:
+            try:
+                self.continuous_stream.close()
+            except Exception as e:
+                print(f"[VAD] Erro ao fechar stream: {e}")
+            finally:
+                self.continuous_stream = None
+        
+        # Update UI
         self.btn_listen_continuous.setText("👂 Escuta Contínua")
         self.btn_listen_continuous.setChecked(False)
         self.btn_stop_listening.setEnabled(False)
@@ -1102,9 +1279,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.audio_level_widget.set_level(0)
         self.audio_level_label.setText("0")
         print(f"[VAD] Escuta contínua parada")
-        if self.continuous_stream:
-            self.continuous_stream.close()
-            self.continuous_stream = None
     
     def _on_stop_listening(self):
         """Handle stop listening button click."""
@@ -1113,13 +1287,18 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _auto_send_phrase(self):
         """Automatically send the detected phrase."""
-        # Make a copy of phrase audio to avoid race conditions
-        if not self.current_phrase_audio:
-            return
+        # Reset flag first to allow future sends
+        self._auto_send_scheduled = False
         
         # Check if still listening (might have been stopped)
         if not self.is_listening_continuously:
             print("[VAD] Escuta parada, cancelando envio automático")
+            self.current_phrase_audio = []
+            return
+        
+        # Make a copy of phrase audio to avoid race conditions
+        if not self.current_phrase_audio:
+            print("[VAD] ⚠️ _auto_send_phrase chamado mas current_phrase_audio está vazio!")
             return
         
         try:
@@ -1130,22 +1309,51 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             
             # Concatenate audio
-            audio_array = np.concatenate(phrase_audio_copy, axis=0)
-            duration = len(audio_array) / self.sample_rate
+            try:
+                audio_array = np.concatenate(phrase_audio_copy, axis=0)
+                # Convert float32 normalized audio (-1.0 to 1.0) to int16 for server
+                # Server expects int16 PCM format
+                if audio_array.dtype == np.float32:
+                    # Clip to [-1.0, 1.0] range and convert to int16
+                    audio_array = np.clip(audio_array, -1.0, 1.0)
+                    audio_array = (audio_array * 32767.0).astype(np.int16)
+                duration = len(audio_array) / self.sample_rate
+                print(f"[VAD] ✅ Áudio preparado: {len(phrase_audio_copy)} chunks, {duration:.2f}s de duração, dtype={audio_array.dtype}")
+            except Exception as e:
+                print(f"[VAD] ❌ Erro ao concatenar áudio: {e}")
+                import traceback
+                traceback.print_exc()
+                self.current_phrase_audio = []
+                return
             
             # Only send if duration is reasonable (at least 0.5 seconds)
             if duration < 0.5:
+                print(f"[VAD] ⚠️ Frase muito curta ({duration:.2f}s), ignorando...")
                 QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText("Frase muito curta, ignorando..."))
                 self.current_phrase_audio = []
                 return
             
             # Update UI in main thread
+            print(f"[VAD] 📤 Preparando para enviar áudio: {duration:.2f}s, {len(audio_array)} amostras")
             QtCore.QTimer.singleShot(0, lambda d=duration: self.audio_status.setText(f"Enviando frase ({d:.1f}s)..."))
             QtCore.QTimer.singleShot(0, lambda d=duration: self.chat_history.appendPlainText(f"Você: [Áudio - {d:.1f}s]"))
             
             # Convert to bytes and encode
             audio_bytes = audio_array.tobytes()
             audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+            print(f"[VAD] 📤 Áudio codificado: {len(audio_bytes)} bytes -> {len(audio_b64)} chars base64")
+            
+            # Pause listener before sending to avoid capturing audio while waiting for response
+            # Only pause if not already paused
+            if self.is_listening_continuously and not self.is_playing_ai_audio:
+                self._was_listening_before_playback = True
+                print("[VAD] 🔇 Pausando listener após envio do áudio (aguardando resposta da IA)...")
+                self._pause_listener()
+            elif not self.is_listening_continuously:
+                self._was_listening_before_playback = False
+            
+            # Clear phrase audio BEFORE sending to prevent race conditions
+            self.current_phrase_audio = []
             
             # Send to server in a separate thread to avoid blocking
             def send_thread():
@@ -1153,6 +1361,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     host = self.host.text().strip() or "127.0.0.1"
                     port = self.port.value()
                     url = f"http://{host}:{port}/api/context/conversation/audio"
+                    print(f"[VAD] 📤 Enviando áudio para {url}...")
                     
                     payload = {
                         "user": "Usuario",
@@ -1163,24 +1372,31 @@ class MainWindow(QtWidgets.QMainWindow):
                         "ch": 1
                     }
                     
+                    print(f"[VAD] 📤 Fazendo POST para {url}...")
                     r = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
+                    print(f"[VAD] 📤 Resposta do servidor: {r.status_code}")
                     
                     # Update UI in main thread
                     if r.ok:
                         response_data = r.json()
                         job_id = response_data.get("response", {}).get("job_id", "desconhecido")
+                        print(f"[VAD] ✅ Áudio enviado com sucesso! job_id: {job_id}")
                         QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText(f"Áudio enviado! Aguardando resposta..."))
                         QtCore.QTimer.singleShot(0, lambda: self._append_server_log(f"Áudio automático enviado ({duration:.1f}s) -> job_id: {job_id}"))
                         
-                        # Request response
-                        QtCore.QTimer.singleShot(0, self._request_response)
+                        # Request response using signal for thread-safe execution
+                        print(f"[VAD] 📤 Solicitando resposta da IA...")
+                        self.request_response_signal.emit()
                     else:
                         error_text = r.text[:200] if r.text else "Sem detalhes"
+                        print(f"[VAD] ❌ Erro ao enviar: {r.status_code} - {error_text}")
                         QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText(f"Erro ao enviar: {r.status_code}"))
                         QtCore.QTimer.singleShot(0, lambda: self.chat_history.appendPlainText(f"Erro ({r.status_code}): {error_text}"))
-                    
-                    # Clear phrase in main thread
-                    QtCore.QTimer.singleShot(0, lambda: setattr(self, 'current_phrase_audio', []))
+                        # Re-enable listener if it was paused (error case - no response will come)
+                        if self._was_listening_before_playback:
+                            print("[VAD] 🔄 Reativando listener após erro no envio...")
+                            self._was_listening_before_playback = False
+                            self._resume_listener()
                 except Exception as e:
                     error_msg = str(e)
                     print(f"[VAD] Erro ao enviar frase: {error_msg}")
@@ -1189,6 +1405,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText(f"Erro: {error_msg}"))
                     QtCore.QTimer.singleShot(0, lambda: self.chat_history.appendPlainText(f"Falha ao enviar frase: {error_msg}"))
                     QtCore.QTimer.singleShot(0, lambda: setattr(self, 'current_phrase_audio', []))
+                    # Re-enable listener if it was paused (error case - no response will come)
+                    if self._was_listening_before_playback:
+                        print("[VAD] 🔄 Reativando listener após erro no envio...")
+                        self._was_listening_before_playback = False
+                        self._resume_listener()
             
             threading.Thread(target=send_thread, daemon=True).start()
             
@@ -1222,40 +1443,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(f"[Audio] Chunk #{self._recording_chunks_count} recebido: {len(chunk)} frames")
         
         # Handle continuous listening with VAD
+        # Skip processing if AI audio is playing to avoid capturing it
+        if self.is_playing_ai_audio:
+            return
+        
         if self.is_listening_continuously:
             audio_chunk = indata.copy()
             
             # Calculate RMS (Root Mean Square) for voice detection
-            # Convert to float32 to avoid overflow, then calculate RMS
-            audio_float = audio_chunk.astype(np.float32)
-            rms = np.sqrt(np.mean(audio_float**2))
+            # indata is already float32 normalized (-1.0 to 1.0) when dtype=np.float32
+            # Calculate RMS and scale to 0-32767 range for display (similar to int16)
+            rms_normalized = np.sqrt(np.mean(audio_chunk**2))
+            # Scale RMS to int16 range (0-32767) for display and threshold comparison
+            # RMS of 1.0 (full scale) = 32767, RMS of 0.0 = 0
+            rms_scaled = int(rms_normalized * 32767.0)
             
-            # Update audio level indicator (throttle updates to avoid UI lag)
-            rms_int = int(rms)
-            QtCore.QTimer.singleShot(0, lambda r=rms_int, t=self.voice_threshold: self._update_audio_level(r, t))
+            # Update audio level indicator in real-time using Signal for thread-safe communication
+            # Signals are thread-safe and will execute in the main thread
+            self.rms_update_signal.emit(rms_scaled, self.voice_threshold)
             
             # Debug: log RMS values occasionally
             if not hasattr(self, '_last_rms_log_time'):
                 self._last_rms_log_time = 0
             current_time = time.time()
             if current_time - self._last_rms_log_time > 2.0:  # Log every 2 seconds
-                log_msg = f"[VAD] RMS: {rms:.1f}, Threshold: {self.voice_threshold}, Detecção: {'✅ SIM' if rms > self.voice_threshold else '❌ NÃO'}"
+                log_msg = f"[VAD] RMS: {rms_scaled}, Threshold: {self.voice_threshold}, Detecção: {'✅ SIM' if rms_scaled > self.voice_threshold else '❌ NÃO'}"
                 print(log_msg)
                 self._append_vad_log(log_msg)
                 self._last_rms_log_time = current_time
             
-            # Check if voice is detected
-            if rms > self.voice_threshold:
+            # Check if voice is detected (use scaled RMS for comparison)
+            if rms_scaled > self.voice_threshold:
                 # Voice detected
                 if not self.is_speaking:
                     self.is_speaking = True
                     self.silence_start_time = None
                     self.current_phrase_audio = []
-                    log_msg = f"[VAD] 🎤 Voz detectada! RMS: {rms:.1f} > Threshold: {self.voice_threshold}"
+                    self._auto_send_scheduled = False  # Reset flag when new voice detected
+                    log_msg = f"[VAD] 🎤 Voz detectada! RMS: {rms_scaled} > Threshold: {self.voice_threshold}"
                     print(log_msg)
                     self._append_vad_log(log_msg)
-                    QtCore.QTimer.singleShot(0, lambda: self.voice_indicator.setText("🎤"))
-                    QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText("Falando..."))
+                    # Use signal for thread-safe UI update
+                    self.voice_detected_signal.emit()
                 
                 # Add to current phrase
                 self.current_phrase_audio.append(audio_chunk)
@@ -1265,32 +1494,52 @@ class MainWindow(QtWidgets.QMainWindow):
                     # We were speaking, now silence
                     if self.silence_start_time is None:
                         self.silence_start_time = time.time()
-                        log_msg = f"[VAD] 🔇 Silêncio detectado após falar. RMS: {rms:.1f} <= Threshold: {self.voice_threshold}"
+                        log_msg = f"[VAD] 🔇 Silêncio detectado após falar. RMS: {rms_scaled} <= Threshold: {self.voice_threshold}"
                         print(log_msg)
                         self._append_vad_log(log_msg)
-                        QtCore.QTimer.singleShot(0, lambda: self.voice_indicator.setText("🔇"))
-                        QtCore.QTimer.singleShot(0, lambda: self.audio_status.setText("Silêncio detectado, aguardando..."))
+                        # Use signal for thread-safe UI update
+                        self.silence_detected_signal.emit()
                     
                     # Check if silence duration exceeded threshold
                     silence_duration = time.time() - self.silence_start_time
-                    if silence_duration >= self.silence_duration:
+                    # Log progress every 0.5 seconds while waiting
+                    if int(silence_duration * 2) != getattr(self, '_last_silence_log', -1):
+                        self._last_silence_log = int(silence_duration * 2)
+                        if silence_duration < self.silence_duration:
+                            print(f"[VAD] ⏳ Aguardando silêncio: {silence_duration:.1f}s / {self.silence_duration:.1f}s (chunks: {len(self.current_phrase_audio)})")
+                    
+                    if silence_duration >= self.silence_duration and not self._auto_send_scheduled:
                         # Auto-send the phrase (only if we still have audio and are still listening)
                         if self.current_phrase_audio and self.is_listening_continuously:
-                            log_msg = f"[VAD] ⏱️ Silêncio de {silence_duration:.1f}s excedeu threshold de {self.silence_duration:.1f}s. Enviando frase..."
+                            # Set flag to prevent multiple sends
+                            self._auto_send_scheduled = True
+                            log_msg = f"[VAD] ⏱️ Silêncio de {silence_duration:.1f}s excedeu threshold de {self.silence_duration:.1f}s. Enviando frase... (chunks: {len(self.current_phrase_audio)})"
                             print(log_msg)
                             self._append_vad_log(log_msg)
-                            # Schedule in main thread to avoid race conditions
-                            QtCore.QTimer.singleShot(0, self._auto_send_phrase)
+                            # Use signal for thread-safe execution in main thread
+                            self.auto_send_triggered_signal.emit()
                             # Reset state after scheduling send
                             self.is_speaking = False
                             self.silence_start_time = None
                             # Don't clear current_phrase_audio here - let _auto_send_phrase handle it
+                        else:
+                            print(f"[VAD] ⚠️ Condições não atendidas: current_phrase_audio={bool(self.current_phrase_audio)}, is_listening={self.is_listening_continuously}")
                 else:
                     # Not speaking, show idle (only update occasionally to reduce spam)
                     pass  # Don't update UI constantly when idle
     
+    def _on_voice_detected(self):
+        """Handle voice detected signal (runs in main thread)."""
+        self.voice_indicator.setText("🎤")
+        self.audio_status.setText("Falando...")
+    
+    def _on_silence_detected(self):
+        """Handle silence detected signal (runs in main thread)."""
+        self.voice_indicator.setText("🔇")
+        self.audio_status.setText("Silêncio detectado, aguardando...")
+    
     def _update_audio_level(self, rms_value: int, threshold: int = None):
-        """Update audio level indicator in UI thread."""
+        """Update audio level indicator in UI thread (called via signal)."""
         if not self.is_listening_continuously:
             return
         
@@ -1298,10 +1547,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if threshold is None:
             threshold = self.voice_threshold
         
-        # Update custom widget if it exists
+        # Update custom widget if it exists (update in real-time for smooth animation)
         if hasattr(self, 'audio_level_widget'):
             self.audio_level_widget.set_level(rms_value)
             self.audio_level_widget.set_threshold(threshold)
+            # Force widget repaint for smooth animation
+            self.audio_level_widget.update()
         
         # Update progress bar (scale to max 2000 for display) - fallback if custom widget doesn't exist
         if hasattr(self, 'audio_level_bar'):
