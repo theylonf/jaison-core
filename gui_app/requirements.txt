@@ -4,4 +4,6 @@ psutil==6.0.0
 sounddevice==0.4.6
 numpy==1.26.4
 websockets==13.1
+pyautogui==0.9.54
+pywin32==306
 

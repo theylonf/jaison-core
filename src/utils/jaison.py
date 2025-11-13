@@ -34,6 +34,7 @@ from utils.operations import (
     UsedInactiveError
 )
 from utils.mcp import MCPManager
+import os
 
 class NonexistantJobException(Exception):
     pass
@@ -98,6 +99,9 @@ class JAIson(metaclass=Singleton):
         self.prompter.add_mcp_usage_prompt(self.mcp_manager.get_tooling_prompt(), self.mcp_manager.get_response_prompt())
         await self.op_manager.load_operations_from_config()
         await self.process_manager.reload()
+        
+        # Vision is now handled through OpRoles.VISION operation
+        # Configuration is done via YAML config file
 
         # Start job processing loop after managers are ready
         self.job_loop = asyncio.create_task(self._process_job_loop())
@@ -357,7 +361,8 @@ class JAIson(metaclass=Singleton):
         history_length: int = None,
         instruction_prompt_filename: str = None,
         character_prompt_filename: str = None,
-        scene_prompt_filename: str = None
+        scene_prompt_filename: str = None,
+        user_context: str = None
     ):
         await self._handle_broadcast_start(job_id, job_type, {
             "name_translations": name_translations,
@@ -365,18 +370,20 @@ class JAIson(metaclass=Singleton):
             "history_length": history_length,
             "instruction_prompt_filename": instruction_prompt_filename,
             "character_prompt_filename": character_prompt_filename,
-            "scene_prompt_filename": scene_prompt_filename
+            "scene_prompt_filename": scene_prompt_filename,
+            "user_context": user_context
         })
         payload = dict()
         if name_translations: payload |= {"name_translations": name_translations}
         if character_name: payload |= {"character_name": character_name}
         if history_length: payload |= {"history_length": history_length}
-        if history_length: payload |= {"history_length": history_length}
         if instruction_prompt_filename: payload |= {"instruction_prompt_filename": instruction_prompt_filename}
         if character_prompt_filename: payload |= {"character_prompt_filename": character_prompt_filename}
         if scene_prompt_filename: payload |= {"scene_prompt_filename": scene_prompt_filename}
+        if user_context is not None: 
+            self.prompter.user_context = user_context
         
-        self.prompter.configure(payload)
+        await self.prompter.configure(payload)
         
         await self._handle_broadcast_success(job_id, job_type)
 
@@ -405,6 +412,69 @@ class JAIson(metaclass=Singleton):
         content: str = None
     ):
         await self._handle_broadcast_start(job_id, job_type, {"user": user, "timestamp": timestamp, "content": content})
+        
+        # Check if vision is triggered
+        vision_result = None
+        vision_triggered = False
+        if content:
+            # Check using vision trigger filter specifically
+            try:
+                async for chunk in self.op_manager.use_operation(OpRoles.FILTER_TEXT, {"content": content}, op_id="vision_trigger"):
+                    if chunk.get('vision_triggered'):
+                        vision_triggered = True
+                        # Use VISION operation to capture and analyze
+                        # Pass vision_use_mouse_area from filter chunk
+                        import logging
+                        logging.info(f"[Vision] Vision triggered! Content: {content[:100]}, use_mouse_area: {chunk.get('vision_use_mouse_area', False)}")
+                        # Use VISION operation to capture and analyze
+                        # Pass vision_use_mouse_area from filter chunk
+                        vision_op = self.op_manager.get_operation(OpRoles.VISION)
+                        if vision_op:
+                            use_mouse_area = chunk.get('vision_use_mouse_area', False)
+                            async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
+                                "screenshot_requested": True,
+                                "vision_use_mouse_area": use_mouse_area
+                            }):
+                                vision_result = vision_chunk
+                                # Broadcast screenshot image to GUI (even if capture failed, send error info)
+                                image_bytes = vision_chunk.get('image_bytes')
+                                if image_bytes:
+                                    logging.info(f"[Vision] Screenshot capturado com sucesso (tamanho: {len(image_bytes)} bytes)")
+                                    await self._handle_broadcast_event(job_id, job_type, {
+                                        "event_type": "vision_screenshot",
+                                        "image_bytes": image_bytes,
+                                        "image_format": vision_chunk.get('image_format', 'png'),
+                                        "user": user,
+                                        "timestamp": timestamp
+                                    })
+                                else:
+                                    error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
+                                    logging.warning(f"[Vision] Falha ao capturar screenshot: {error_msg}")
+                                    # Ainda assim, enviar evento para informar a GUI sobre o erro
+                                    await self._handle_broadcast_event(job_id, job_type, {
+                                        "event_type": "vision_screenshot",
+                                        "image_bytes": None,
+                                        "image_format": "png",
+                                        "error": error_msg,
+                                        "user": user,
+                                        "timestamp": timestamp
+                                    })
+                                break
+                        else:
+                            logging.warning("[Vision] Vision operation não está carregada")
+                        break
+            except Exception as e:
+                # Se vision_trigger não estiver carregado, continua sem visão
+                import logging
+                logging.debug(f"Vision trigger filter not available: {e}")
+        
+        # Add vision description to context if available
+        if vision_result and vision_result.get('description'):
+            # Add vision context to system prompt temporarily
+            vision_description = vision_result.get('description')
+            # Format: Add as special context that the AI can interpret naturally
+            content = f"{content}\n[Contexto visual: {vision_description}]"
+        
         self.prompter.add_chat(
             user,
             content,
@@ -447,6 +517,63 @@ class JAIson(metaclass=Singleton):
         # Only add to chat if content is not empty after stripping whitespace
         content = content.strip()
         if content:
+            # Check if vision is triggered
+            vision_result = None
+            vision_triggered = False
+            # Check using vision trigger filter specifically
+            try:
+                async for chunk in self.op_manager.use_operation(OpRoles.FILTER_TEXT, {"content": content}, op_id="vision_trigger"):
+                    if chunk.get('vision_triggered'):
+                        vision_triggered = True
+                        import logging
+                        logging.info(f"[Vision] Vision triggered! Content: {content[:100]}, use_mouse_area: {chunk.get('vision_use_mouse_area', False)}")
+                        # Use VISION operation to capture and analyze
+                        # Pass vision_use_mouse_area from filter chunk
+                        vision_op = self.op_manager.get_operation(OpRoles.VISION)
+                        if vision_op:
+                            use_mouse_area = chunk.get('vision_use_mouse_area', False)
+                            async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
+                                "screenshot_requested": True,
+                                "vision_use_mouse_area": use_mouse_area
+                            }):
+                                vision_result = vision_chunk
+                                # Broadcast screenshot image to GUI (even if capture failed, send error info)
+                                image_bytes = vision_chunk.get('image_bytes')
+                                if image_bytes:
+                                    logging.info(f"[Vision] Screenshot capturado com sucesso (tamanho: {len(image_bytes)} bytes)")
+                                    await self._handle_broadcast_event(job_id, job_type, {
+                                        "event_type": "vision_screenshot",
+                                        "image_bytes": image_bytes,
+                                        "image_format": vision_chunk.get('image_format', 'png'),
+                                        "user": user,
+                                        "timestamp": timestamp
+                                    })
+                                else:
+                                    error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
+                                    logging.warning(f"[Vision] Falha ao capturar screenshot: {error_msg}")
+                                    # Ainda assim, enviar evento para informar a GUI sobre o erro
+                                    await self._handle_broadcast_event(job_id, job_type, {
+                                        "event_type": "vision_screenshot",
+                                        "image_bytes": None,
+                                        "image_format": "png",
+                                        "error": error_msg,
+                                        "user": user,
+                                        "timestamp": timestamp
+                                    })
+                                break
+                        else:
+                            logging.warning("[Vision] Vision operation não está carregada")
+                        break
+            except Exception as e:
+                # Se vision_trigger não estiver carregado, continua sem visão
+                import logging
+                logging.debug(f"Vision trigger filter not available: {e}")
+            
+            # Add vision description to context if available
+            if vision_result and vision_result.get('description'):
+                vision_description = vision_result.get('description')
+                content = f"{content}\n[Contexto visual: {vision_description}]"
+            
             self.prompter.add_chat(
                 user,
                 content,

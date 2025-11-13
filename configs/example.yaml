@@ -43,6 +43,12 @@ operations:
 
   # Text filters
 - role: filter_text
+  id: vision_trigger  # Detects keywords that trigger image recognition
+- role: vision
+  id: gemini_vision
+  model: gemini-2.5-flash  # Modelo do Gemini com suporte a visão (estável, não descontinuado)
+  mouse_radius: 200  # Raio em pixels ao redor do mouse (quando detectar palavras-chave de mouse)
+- role: filter_text
   id: filter_clean
 - role: filter_text
   id: emotion_roberta
@@ -142,3 +148,10 @@ kcpps_filepath: E:\\jaison-core\\models\\kobold\\save.kcpps # must be absolute
 
 # Spacy NLP
 spacy_model: en_core_web_sm
+
+# Vision - Image Recognition
+# API key should be in .env file as GEMINI_API_KEY
+# O modo de captura (tela inteira ou área do mouse) é detectado automaticamente
+# através das palavras-chave usadas pelo usuário
+vision:
+  mouse_radius: 200  # Raio em pixels ao redor do mouse (quando detectar palavras-chave de mouse)

@@ -25,6 +25,9 @@ class Prompter(metaclass=Singleton):
         self.tooling_prompt = ""
         self.response_template = ""
         
+        self.user_context: str = ""  # Contexto do usuário (nome, preferências, etc.)
+        self._load_default_user_context()
+        
     async def configure(self, config_d: Dict[str, Any]):
         if "instruction_prompt_filename" in config_d: self.instruction_prompt_filename = str(config_d["instruction_prompt_filename"])
         if "character_prompt_filename" in config_d: self.character_prompt_filename = str(config_d["character_prompt_filename"])
@@ -32,6 +35,7 @@ class Prompter(metaclass=Singleton):
         if "character_name" in config_d: self.character_name = str(config_d["character_name"])
         if "name_translations" in config_d: self.name_translations = dict(config_d["name_translations"])
         if "history_length" in config_d: self.history_length = int(config_d["history_length"])
+        if "user_context" in config_d: self.user_context = str(config_d["user_context"])
         
         assert (
             self.instruction_prompt_filename is not None and 
@@ -119,6 +123,20 @@ class Prompter(metaclass=Singleton):
         if time is None: time = get_current_time(include_ms=False, as_str=False)
         
         self.insert_history(RequestMessage(message, time))
+    
+    def _load_default_user_context(self):
+        """Load default user context from file if it exists."""
+        try:
+            user_context_path = portable_path(os.path.join(
+                Config().PROMPT_DIR,
+                Config().USER_CONTEXT_FILENAME
+            ))
+            if os.path.isfile(user_context_path):
+                with open(user_context_path, 'r', encoding='utf-8') as f:
+                    self.user_context = f.read().strip()
+        except Exception as e:
+            # Se não conseguir carregar, deixa vazio
+            self.user_context = ""
         
     # Prompt generators
     def get_instructions_prompt(self):
@@ -156,10 +174,15 @@ class Prompter(metaclass=Singleton):
             return f.read()
     
     def get_sys_prompt(self):
-        return "{instructions}\n{mcp_usage}\n{contexts}\n### Character ###\n{character}\n### Scene ###\n{scene}".format(
+        user_context_section = ""
+        if self.user_context and self.user_context.strip():
+            user_context_section = f"\n### User Context ###\n{self.user_context}\n"
+        
+        return "{instructions}\n{mcp_usage}\n{contexts}{user_context}### Character ###\n{character}\n### Scene ###\n{scene}".format(
             instructions = self.get_instructions_prompt(),
             contexts = self.get_context_descriptions(),
             mcp_usage = self.response_template,
+            user_context = user_context_section,
             character = self.get_character_prompt(),
             scene = self.get_scene_prompt(),
         )

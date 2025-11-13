@@ -28,7 +28,12 @@ class CustomFormatter(logging.Formatter):
     def format(self, record):
         log_fmt = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
+        try:
+            return formatter.format(record)
+        except UnicodeEncodeError:
+            # Fallback: remove problematic characters
+            record.msg = str(record.msg).encode('ascii', 'replace').decode('ascii')
+            return formatter.format(record)
     
 def setup_logger():
     global START_TIME
@@ -44,6 +49,13 @@ def setup_logger():
     logger.addHandler(file_handler)
 
     if not args.silent:
+        # Configure console handler with safe encoding for Windows
         console_handler = logging.StreamHandler(sys.stdout)
+        # Try to reconfigure stdout for UTF-8 if possible
+        if hasattr(sys.stdout, 'reconfigure'):
+            try:
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            except (AttributeError, OSError):
+                pass
         console_handler.setFormatter(CustomFormatter())
         logger.addHandler(console_handler)

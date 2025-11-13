@@ -1,3 +1,18 @@
+import sys
+
+# Configure stdout/stderr encoding for Windows before logging
+if sys.platform == "win32":
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, OSError):
+            pass
+    if hasattr(sys.stderr, 'reconfigure'):
+        try:
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, OSError):
+            pass
+
 from utils.logging import setup_logger
 setup_logger()
 

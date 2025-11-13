@@ -27,6 +27,7 @@ class Config(metaclass=Singleton):
     PROMPT_INSTRUCTION_SUBDIR: str = "instructions"
     PROMPT_CHARACTER_SUBDIR: str = "characters"
     PROMPT_SCENE_SUBDIR: str = "scenes"
+    USER_CONTEXT_FILENAME: str = "user_context.txt"
     
     prompter: dict = dict()
     history_filepath: str = portable_path(os.path.join(os.getcwd(), "output", "history.txt")) # debug
@@ -47,6 +48,9 @@ class Config(metaclass=Singleton):
     ffmpeg_working_src: str = portable_path(os.path.join(WORKING_DIR,'ffmpeg_src.wav'))
     ffmpeg_working_dest: str = portable_path(os.path.join(WORKING_DIR,'ffmpeg_dest.wav'))
     spacy_model: str = None
+    
+    # Vision
+    vision: dict = dict()
     
     def __init__(self):
         # Every attribute must be typed for validation

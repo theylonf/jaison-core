@@ -55,6 +55,7 @@ class ChatHandler:
         self.audio_listener.audio_chunk_received.connect(self._on_audio_chunk_received)
         self.audio_listener.audio_complete.connect(self._on_audio_complete)
         self.audio_listener.text_received.connect(self._on_text_received)
+        self.audio_listener.image_received.connect(self._on_image_received)
         self.audio_listener.error_received.connect(self._on_error_received)
         self.audio_listener.start()
         
@@ -108,6 +109,11 @@ class ChatHandler:
         if text.strip() and self.on_text_received:
             self.on_text_received(text)
     
+    def _on_image_received(self, image_bytes_b64: str, user_name: str, image_format: str, error: str):
+        """Handle image received from server."""
+        if self.on_image_received:
+            self.on_image_received(image_bytes_b64, user_name, image_format, error or None)
+    
     def _on_error_received(self, error_msg: str):
         """Handle error received from server."""
         if self.on_error_received:
@@ -147,6 +153,37 @@ class ChatHandler:
             return False, "Timeout: O servidor demorou muito para responder."
         except Exception as e:
             return False, f"Falha ao enviar: {e}"
+    
+    def update_user_context(self, user_context: str) -> tuple[bool, Optional[str]]:
+        """
+        Update user context on server.
+        Returns: (success, message or error_message)
+        """
+        url = f"http://{self.host}:{self.port}/api/context/config"
+        
+        try:
+            payload = {
+                "user_context": user_context
+            }
+            
+            r = requests.put(
+                url, 
+                headers={"Content-Type": "application/json"}, 
+                data=json.dumps(payload), 
+                timeout=30
+            )
+            
+            if r.ok:
+                response_data = r.json()
+                job_id = response_data.get("response", {}).get("job_id", "desconhecido")
+                return True, job_id
+            else:
+                error_msg = r.text[:500] if r.text else "Sem detalhes"
+                return False, f"Erro ({r.status_code}): {error_msg}"
+        except requests.exceptions.ConnectionError:
+            return False, f"Não foi possível conectar ao servidor em {url}"
+        except Exception as e:
+            return False, f"Erro inesperado: {str(e)}"
     
     def send_audio(self, audio_array: np.ndarray, sample_rate: int, user: str = "Usuario") -> tuple[bool, Optional[str]]:
         """

@@ -13,6 +13,7 @@ class OpTypes(Enum):
     FILTER_AUDIO = "filter_audio"
     FILTER_TEXT = "filter_text"
     EMBEDDING = "embedding"
+    VISION = "vision"
     
 class OpRoles(Enum):
     STT = "stt"
@@ -22,6 +23,7 @@ class OpRoles(Enum):
     FILTER_AUDIO = "filter_audio"
     FILTER_TEXT = "filter_text"
     EMBEDDING = "embedding"
+    VISION = "vision"
     
 def role_to_type(op_role: OpRoles) -> OpTypes:
     match op_role:
@@ -39,6 +41,8 @@ def role_to_type(op_role: OpRoles) -> OpTypes:
             return OpTypes.FILTER_TEXT
         case OpRoles.EMBEDDING:
             return OpTypes.EMBEDDING
+        case OpRoles.VISION:
+            return OpTypes.VISION
         case _:
             raise UnknownOpRole(op_role)
     
@@ -122,6 +126,9 @@ def load_op(op_type: OpTypes, op_id: str):
             elif op_id == "style_preserver":
                 from .filter_text.style_preserver import StylePreserverFilter
                 return StylePreserverFilter()
+            elif op_id == "vision_trigger":
+                from .filter_text.vision_trigger import VisionTriggerFilter
+                return VisionTriggerFilter()
             else:
                 raise UnknownOpID("FILTER_TEXT", op_id)
         case OpTypes.EMBEDDING:
@@ -130,6 +137,15 @@ def load_op(op_type: OpTypes, op_id: str):
                 return OpenAIEmbedding()
             else:
                 raise UnknownOpID("EMBEDDING", op_id)
+        case OpTypes.VISION:
+            if op_id == "rapidapi_caption":
+                from .vision.rapidapi_caption import RapidAPICaptionVision
+                return RapidAPICaptionVision()
+            elif op_id == "gemini_vision":
+                from .vision.gemini_vision import GeminiVision
+                return GeminiVision()
+            else:
+                raise UnknownOpID("VISION", op_id)
         case _:
             # Should never get here if op_role is indeed OpRole
             raise UnknownOpRole(op_type)
@@ -143,6 +159,7 @@ class OperationManager(metaclass=Singleton):
         self.filter_audio = list()
         self.filter_text = list()
         self.embedding = None
+        self.vision = None
 
     def get_operation(self, op_role: OpRoles) -> Operation:
         match op_role:
@@ -160,6 +177,8 @@ class OperationManager(metaclass=Singleton):
                 return self.filter_text
             case OpRoles.EMBEDDING:
                 return self.embedding
+            case OpRoles.VISION:
+                return self.vision
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)
@@ -173,6 +192,7 @@ class OperationManager(metaclass=Singleton):
             "filter_audio": self.get_operation(OpRoles.FILTER_AUDIO),
             "filter_text": self.get_operation(OpRoles.FILTER_TEXT),
             "embedding": self.get_operation(OpRoles.EMBEDDING),
+            "vision": self.get_operation(OpRoles.VISION),
         }
         
     async def get_configuration(
@@ -231,6 +251,13 @@ class OperationManager(metaclass=Singleton):
                     raise OperationUnloaded("EMBEDDING", op_id=op_id)
                 
                 return await self.embedding.get_configuration()
+            case OpRoles.VISION:
+                if not self.vision:
+                    raise OperationUnloaded("VISION")
+                elif op_id and self.vision and self.vision.op_id != op_id:
+                    raise OperationUnloaded("VISION", op_id=op_id)
+                
+                return await self.vision.get_configuration()
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)
@@ -268,6 +295,9 @@ class OperationManager(metaclass=Singleton):
             case OpRoles.EMBEDDING:
                 if self.embedding: await self.embedding.close()
                 self.embedding = new_op
+            case OpRoles.VISION:
+                if self.vision: await self.vision.close()
+                self.vision = new_op
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)
@@ -340,6 +370,14 @@ class OperationManager(metaclass=Singleton):
                 
                 await self.embedding.close()
                 self.embedding = None
+            case OpRoles.VISION:
+                if not self.vision:
+                    raise OperationUnloaded("VISION")
+                elif op_id and self.vision and self.vision.op_id != op_id:
+                    raise OperationUnloaded("VISION", op_id=op_id)
+                
+                await self.vision.close()
+                self.vision = None
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)
@@ -366,6 +404,9 @@ class OperationManager(metaclass=Singleton):
         if self.embedding:
             await self.embedding.close()
             self.embedding = None
+        if self.vision:
+            await self.vision.close()
+            self.vision = None
         
     async def configure(self,
         op_role: OpRoles,
@@ -423,6 +464,13 @@ class OperationManager(metaclass=Singleton):
                     raise OperationUnloaded("EMBEDDING", op_id=op_id)
                 
                 return await self.embedding.configure(config_d)
+            case OpRoles.VISION:
+                if not self.vision:
+                    raise OperationUnloaded("VISION")
+                elif op_id and self.vision and self.vision.op_id != op_id:
+                    raise OperationUnloaded("VISION", op_id=op_id)
+                
+                return await self.vision.configure(config_d)
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)
@@ -496,6 +544,13 @@ class OperationManager(metaclass=Singleton):
                     raise OperationUnloaded("EMBEDDING", op_id=op_id)
                 
                 return self.embedding(chunk_in)
+            case OpRoles.VISION:
+                if not self.vision:
+                    raise OperationUnloaded("VISION")
+                elif op_id and self.vision and self.vision.op_id != op_id:
+                    raise OperationUnloaded("VISION", op_id=op_id)
+                
+                return self.vision(chunk_in)
             case _:
                 # Should never get here if op_role is indeed OpRoles
-                raise UnknownOpType(op_role)
+                raise UnknownOpRole(op_role)

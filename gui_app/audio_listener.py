@@ -9,6 +9,7 @@ class AudioListener(QtCore.QThread):
     audio_chunk_received = QtCore.Signal(str, int, int, int)  # audio_b64_chunk, sr, sw, ch
     audio_complete = QtCore.Signal(int, int, int)  # sr, sw, ch - signal when all chunks received
     text_received = QtCore.Signal(str, str)  # text, user_name
+    image_received = QtCore.Signal(str, str, str, str)  # image_bytes_b64, user_name, image_format, error
     error_received = QtCore.Signal(str)  # error message
 
     def __init__(self, ws_url: str):
@@ -20,32 +21,25 @@ class AudioListener(QtCore.QThread):
         self.current_audio_ch = 1
 
     def run(self) -> None:
-        print(f"[WebSocket] Thread iniciada, criando event loop...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        print(f"[WebSocket] Event loop criado, iniciando _listen()...")
         try:
             loop.run_until_complete(self._listen())
         except Exception as e:
-            print(f"[WebSocket] ❌ Erro no event loop: {e}")
+            pass  # Error already logged
             import traceback
             traceback.print_exc()
         finally:
-            print(f"[WebSocket] Thread finalizada")
+            pass
 
     async def _listen(self):
         while not self._stop:
             try:
-                print(f"[WebSocket] 🔌 Tentando conectar em {self.ws_url}...")
                 async with websockets.connect(self.ws_url) as ws:
-                    print(f"[WebSocket] ✅ Conectado! Aguardando eventos...")
                     while not self._stop:
                         try:
                             data = await asyncio.wait_for(ws.recv(), timeout=1.0)
                             message = json.loads(data)
-                            
-                            # Debug: log raw message
-                            print(f"[WebSocket] 📨 Mensagem recebida: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
                             
                             # Handle response format from server
                             # Format: {"status": 200, "message": "event_id", "response": {...}}
@@ -55,14 +49,6 @@ class AudioListener(QtCore.QThread):
                             event_type = message.get("message", "")
                             response = message.get("response", {})
                             status_code = message.get("status", 200)
-                            
-                            # Debug: log event type and structure
-                            print(f"[WebSocket] 🔍 Evento tipo: '{event_type}', Status: {status_code}")
-                            print(f"[WebSocket] 🔍 Response keys: {list(response.keys())}")
-                            if "result" in response:
-                                result = response.get("result", {})
-                                if isinstance(result, dict):
-                                    print(f"[WebSocket] 🔍 Result keys: {list(result.keys())}")
                             
                             # Get result from response (audio and text are usually in result)
                             result = response.get("result", {})
@@ -82,7 +68,6 @@ class AudioListener(QtCore.QThread):
                                 self.current_audio_ch = ch
                                 
                                 # Emit chunk signal for reassembly
-                                print(f"[WebSocket] Chunk de áudio detectado em result (sr={sr}, ch={ch}, tamanho_b64={len(audio_b64)})")
                                 self.audio_chunk_received.emit(audio_b64, sr, sw, ch)
                             
                             # Check for audio data directly in response (fallback)
@@ -98,8 +83,22 @@ class AudioListener(QtCore.QThread):
                                 self.current_audio_ch = ch
                                 
                                 # Emit chunk signal for reassembly
-                                print(f"[WebSocket] Chunk de áudio detectado em response (sr={sr}, ch={ch}, tamanho_b64={len(audio_b64)})")
                                 self.audio_chunk_received.emit(audio_b64, sr, sw, ch)
+                            
+                            # Check for vision screenshot event
+                            # The event_type is inside result, not directly in response
+                            if isinstance(result, dict) and result.get("event_type") == "vision_screenshot":
+                                image_bytes_b64 = result.get("image_bytes")
+                                image_format = result.get("image_format", "png")
+                                user_name = result.get("user", "Sistema")
+                                error = result.get("error")
+                                # Emit signal with all parameters (including error)
+                                self.image_received.emit(
+                                    image_bytes_b64 or "",
+                                    user_name,
+                                    image_format,
+                                    error or ""
+                                )
                             
                             # Check for text content in result
                             if isinstance(result, dict):
@@ -107,12 +106,10 @@ class AudioListener(QtCore.QThread):
                                 content = result.get("content", "")
                                 user_name = result.get("user", "")  # Get user name from result
                                 if content and content.strip():
-                                    print(f"[WebSocket] Texto detectado em result.content: {content[:100]}...")
                                     self.text_received.emit(content, user_name)
                                 # Also check raw_content
                                 raw_content = result.get("raw_content", "")
                                 if raw_content and raw_content.strip() and not content:
-                                    print(f"[WebSocket] Texto detectado em result.raw_content: {raw_content[:100]}...")
                                     self.text_received.emit(raw_content, user_name)
                             
                             # Check for content directly in response (alternative format)
@@ -120,7 +117,6 @@ class AudioListener(QtCore.QThread):
                                 content = response["content"]
                                 user_name = response.get("user", "")
                                 if content and content.strip():
-                                    print(f"[WebSocket] Texto detectado em response.content: {content[:100]}...")
                                     self.text_received.emit(content, user_name)
                             
                             # Check for raw_content directly in response
@@ -128,7 +124,6 @@ class AudioListener(QtCore.QThread):
                                 raw_content = response["raw_content"]
                                 user_name = response.get("user", "")
                                 if raw_content and raw_content.strip():
-                                    print(f"[WebSocket] Texto detectado em response.raw_content: {raw_content[:100]}...")
                                     self.text_received.emit(raw_content, user_name)
                             
                             # Check for errors in response
@@ -138,7 +133,6 @@ class AudioListener(QtCore.QThread):
                                     error_msg = error_info.get("message", str(error_info))
                                 else:
                                     error_msg = str(error_info)
-                                print(f"[WebSocket] ❌ Erro detectado: {error_msg}")
                                 self.error_received.emit(error_msg)
                             
                             # Check for job completion (success event) - signal to assemble audio
@@ -147,58 +141,40 @@ class AudioListener(QtCore.QThread):
                             success = response.get("success", False)
                             job_id = response.get("job_id", "")
                             
-                            print(f"[WebSocket] 🔍 Verificando conclusão: event_type='{event_type}', finished={finished}, success={success}, job_id={job_id}")
-                            
                             # Check for completion: event_type == "response" with finished=True
                             if event_type == "response" and finished:
-                                print(f"[WebSocket] ✅ Evento de conclusão detectado: {event_type}, finished={finished}, success={success}")
-                                print(f"[WebSocket] Parâmetros de áudio armazenados: sr={self.current_audio_sr}, sw={self.current_audio_sw}, ch={self.current_audio_ch}")
                                 # Only emit audio_complete if successful
                                 if success is not False:
-                                    print(f"[WebSocket] ✅ Emitindo sinal audio_complete")
                                     self.audio_complete.emit(self.current_audio_sr, self.current_audio_sw, self.current_audio_ch)
-                                else:
-                                    print(f"[WebSocket] ⚠️ Job concluído mas success=False, não emitindo audio_complete")
                             
                             # Also check for "response_success" event type (legacy)
                             elif event_type == "response_success":
-                                print(f"[WebSocket] ✅ Evento response_success detectado (legacy)")
                                 self.audio_complete.emit(self.current_audio_sr, self.current_audio_sw, self.current_audio_ch)
                             
                             # Also check if response indicates completion in other ways
                             elif response.get("status") == "completed" or response.get("complete", False):
-                                print(f"[WebSocket] ✅ Status de conclusão detectado no response (status/complete)")
                                 self.audio_complete.emit(self.current_audio_sr, self.current_audio_sw, self.current_audio_ch)
                             
                             # Check for error status codes
                             status_code = message.get("status", 200)
                             if status_code >= 400:
                                 error_msg = f"Erro HTTP {status_code}: {response.get('error', 'Erro desconhecido')}"
-                                print(f"[WebSocket] ❌ {error_msg}")
                                 self.error_received.emit(error_msg)
                         except asyncio.TimeoutError:
                             # Timeout é normal, apenas continua aguardando
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
-                            print(f"[WebSocket] ⚠️ Conexão fechada: {e}")
                             break
                         except json.JSONDecodeError as e:
-                            print(f"[WebSocket] ❌ Erro ao decodificar JSON: {e}")
-                            print(f"[WebSocket] Dados recebidos: {data[:200] if 'data' in locals() else 'N/A'}")
                             continue
             except websockets.exceptions.InvalidURI as e:
-                print(f"[WebSocket] ❌ URI inválida: {e}")
                 if not self._stop:
                     await asyncio.sleep(5)
             except websockets.exceptions.InvalidHandshake as e:
-                print(f"[WebSocket] ❌ Handshake inválido: {e}")
                 if not self._stop:
                     await asyncio.sleep(5)
             except Exception as e:
                 if not self._stop:
-                    print(f"[WebSocket] ❌ Erro no websocket: {e}")
-                    import traceback
-                    traceback.print_exc()
                     await asyncio.sleep(2)
                 else:
                     break
