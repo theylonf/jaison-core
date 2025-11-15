@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Dict, List, AsyncGenerator, Any
+import logging
 
 from .error import UnknownOpType, UnknownOpRole, UnknownOpID, DuplicateFilter, OperationUnloaded
 from .base import Operation
@@ -78,6 +79,9 @@ def load_op(op_type: OpTypes, op_id: str):
             elif op_id == "kobold":
                 from .t2t.kobold import KoboldT2T
                 return KoboldT2T()
+            elif op_id == "perplexity":
+                from .t2t.perplexity import PerplexityT2T
+                return PerplexityT2T()
             else:
                 raise UnknownOpID("T2T", op_id)
         case OpTypes.TTS:
@@ -154,12 +158,20 @@ class OperationManager(metaclass=Singleton):
     def __init__(self):
         self.stt = None
         self.mcp = None
+        self.mcp_fallback = list()  # Lista de operações mcp para fallback
         self.t2t = None
+        self.t2t_fallback = list()  # Lista de operações t2t para fallback
         self.tts = None
         self.filter_audio = list()
         self.filter_text = list()
         self.embedding = None
         self.vision = None
+        self.vision_fallback = list()  # Lista de operações vision para fallback
+        
+        # Blacklist temporária de APIs com rate limit (até reiniciar servidor)
+        self.t2t_rate_limited = set()  # IDs de operações T2T com rate limit
+        self.mcp_rate_limited = set()  # IDs de operações MCP com rate limit
+        self.vision_rate_limited = set()  # IDs de operações Vision com rate limit
 
     def get_operation(self, op_role: OpRoles) -> Operation:
         match op_role:
@@ -280,10 +292,14 @@ class OperationManager(metaclass=Singleton):
                 if self.stt: await self.stt.close()
                 self.stt = new_op
             case OpRoles.MCP:
-                if self.mcp: await self.mcp.close()
+                # Se já existe uma operação mcp principal, move para fallback
+                if self.mcp:
+                    self.mcp_fallback.append(self.mcp)
                 self.mcp = new_op
             case OpRoles.T2T:
-                if self.t2t: await self.t2t.close()
+                # Se já existe uma operação t2t principal, move para fallback
+                if self.t2t:
+                    self.t2t_fallback.append(self.t2t)
                 self.t2t = new_op
             case OpRoles.TTS:
                 if self.tts: await self.tts.close()
@@ -296,7 +312,9 @@ class OperationManager(metaclass=Singleton):
                 if self.embedding: await self.embedding.close()
                 self.embedding = new_op
             case OpRoles.VISION:
-                if self.vision: await self.vision.close()
+                # Se já existe uma operação vision principal, move para fallback
+                if self.vision:
+                    self.vision_fallback.append(self.vision)
                 self.vision = new_op
             case _:
                 # Should never get here if op_role is indeed OpRoles
@@ -309,7 +327,125 @@ class OperationManager(metaclass=Singleton):
         await self.close_operation_all()
         
         operations = Config().operations
+        
+        # Separar operações que suportam fallback (T2T, MCP e VISION) das outras
+        t2t_ops = []
+        mcp_ops = []
+        vision_ops = []
+        other_ops = []
+        
         for op_details in operations:
+            op_role = OpRoles(op_details['role'])
+            if op_role == OpRoles.T2T:
+                t2t_ops.append(op_details)
+            elif op_role == OpRoles.MCP:
+                mcp_ops.append(op_details)
+            elif op_role == OpRoles.VISION:
+                vision_ops.append(op_details)
+            else:
+                other_ops.append(op_details)
+        
+        # Processar T2T: encontrar principal ou usar primeira
+        if t2t_ops:
+            principal_t2t = None
+            fallback_t2t = []
+            
+            # Procurar operação marcada como default
+            for op_details in t2t_ops:
+                if op_details.get('default', False):
+                    principal_t2t = op_details
+                    break
+            
+            # Se não encontrou default, primeira é default
+            if principal_t2t is None and t2t_ops:
+                principal_t2t = t2t_ops[0]
+                fallback_t2t = t2t_ops[1:]
+            else:
+                # Adicionar outras como fallback na ordem que aparecem
+                for op_details in t2t_ops:
+                    if op_details != principal_t2t:
+                        fallback_t2t.append(op_details)
+            
+            # Carregar default primeiro
+            if principal_t2t:
+                op_role = OpRoles(principal_t2t['role'])
+                op_id = principal_t2t['id']
+                await self.load_operation(op_role, op_id, principal_t2t)
+            
+            # Carregar fallbacks
+            for op_details in fallback_t2t:
+                op_role = OpRoles(op_details['role'])
+                op_id = op_details['id']
+                await self.load_operation(op_role, op_id, op_details)
+        
+        # Processar MCP: encontrar principal ou usar primeira
+        if mcp_ops:
+            principal_mcp = None
+            fallback_mcp = []
+            
+            # Procurar operação marcada como default
+            for op_details in mcp_ops:
+                if op_details.get('default', False):
+                    principal_mcp = op_details
+                    break
+            
+            # Se não encontrou default, primeira é default
+            if principal_mcp is None and mcp_ops:
+                principal_mcp = mcp_ops[0]
+                fallback_mcp = mcp_ops[1:]
+            else:
+                # Adicionar outras como fallback na ordem que aparecem
+                for op_details in mcp_ops:
+                    if op_details != principal_mcp:
+                        fallback_mcp.append(op_details)
+            
+            # Carregar default primeiro
+            if principal_mcp:
+                op_role = OpRoles(principal_mcp['role'])
+                op_id = principal_mcp['id']
+                await self.load_operation(op_role, op_id, principal_mcp)
+            
+            # Carregar fallbacks
+            for op_details in fallback_mcp:
+                op_role = OpRoles(op_details['role'])
+                op_id = op_details['id']
+                await self.load_operation(op_role, op_id, op_details)
+        
+        # Processar VISION: encontrar principal ou usar primeira
+        if vision_ops:
+            principal_vision = None
+            fallback_vision = []
+            
+            # Procurar operação marcada como default
+            for op_details in vision_ops:
+                if op_details.get('default', False):
+                    principal_vision = op_details
+                    break
+            
+            # Se não encontrou default, primeira é default
+            if principal_vision is None and vision_ops:
+                principal_vision = vision_ops[0]
+                fallback_vision = vision_ops[1:]
+            else:
+                # Adicionar outras como fallback na ordem que aparecem
+                for op_details in vision_ops:
+                    if op_details != principal_vision:
+                        fallback_vision.append(op_details)
+            
+            # Carregar default primeiro
+            if principal_vision:
+                op_role = OpRoles(principal_vision['role'])
+                op_id = principal_vision['id']
+                await self.load_operation(op_role, op_id, principal_vision)
+            
+            # Carregar fallbacks
+            for op_details in fallback_vision:
+                op_role = OpRoles(op_details['role'])
+                op_id = op_details['id']
+                await self.load_operation(op_role, op_id, op_details)
+        
+        # Carregar outras operações normalmente
+        for op_details in other_ops:
             op_role = OpRoles(op_details['role'])
             op_id = op_details['id']
             await self.load_operation(op_role, op_id, op_details)
@@ -389,9 +525,17 @@ class OperationManager(metaclass=Singleton):
         if self.mcp:
             await self.mcp.close()
             self.mcp = None
+        for op in self.mcp_fallback:
+            await op.close()
+        self.mcp_fallback.clear()
+        self.mcp_rate_limited.clear()
         if self.t2t:
             await self.t2t.close()
             self.t2t = None
+        for op in self.t2t_fallback:
+            await op.close()
+        self.t2t_fallback.clear()
+        self.t2t_rate_limited.clear()
         if self.tts:
             await self.tts.close()
             self.tts = None
@@ -407,6 +551,10 @@ class OperationManager(metaclass=Singleton):
         if self.vision:
             await self.vision.close()
             self.vision = None
+        for op in self.vision_fallback:
+            await op.close()
+        self.vision_fallback.clear()
+        self.vision_rate_limited.clear()
         
     async def configure(self,
         op_role: OpRoles,
@@ -484,6 +632,355 @@ class OperationManager(metaclass=Singleton):
         else: # Is last filter
             async for chunk_out in filter_list[filter_idx](chunk_in):
                 yield chunk_out
+    
+    async def _use_t2t_with_fallback(self, chunk_in: Dict[str, Any], op_id: str = None):
+        '''Tenta usar uma operação t2t e, se falhar com rate limit, tenta a próxima'''
+        from openai import RateLimitError
+        
+        # Lista de todas as operações t2t disponíveis (principal + fallbacks)
+        t2t_operations = []
+        if self.t2t:
+            t2t_operations.append(self.t2t)
+        t2t_operations.extend(self.t2t_fallback)
+        
+        if not t2t_operations:
+            raise OperationUnloaded("T2T")
+        
+        # Se op_id foi especificado, filtra apenas a operação correspondente
+        if op_id:
+            t2t_operations = [op for op in t2t_operations if op.op_id == op_id]
+            if not t2t_operations:
+                raise OperationUnloaded("T2T", op_id=op_id)
+        
+        # Filtrar operações que estão com rate limit (pular direto para fallback)
+        available_operations = [op for op in t2t_operations if op.op_id not in self.t2t_rate_limited]
+        
+        # Se todas estão com rate limit, limpar blacklist e tentar novamente
+        if not available_operations:
+            logging.warning(f"[OperationManager] ⚠️ Todas as APIs T2T estão com rate limit, limpando blacklist e tentando novamente...")
+            self.t2t_rate_limited.clear()
+            available_operations = t2t_operations
+        
+        last_error = None
+        tried_operations = []
+        for idx, op in enumerate(available_operations):
+            try:
+                success = False
+                async for chunk_out in op(chunk_in):
+                    success = True
+                    yield chunk_out
+                # Se chegou aqui, a operação foi bem-sucedida
+                if success:
+                    if idx > 0:
+                        # Se não era a primeira operação, houve fallback
+                        logging.info(f"[OperationManager] ✅ T2T fallback bem-sucedido: {tried_operations[0]} → {op.op_id}")
+                    return
+            except RateLimitError as e:
+                last_error = e
+                tried_operations.append(op.op_id)
+                # Adicionar à blacklist temporária
+                self.t2t_rate_limited.add(op.op_id)
+                logging.warning(f"[OperationManager] ⚠️ Rate limit atingido para T2T '{op.op_id}', adicionando à blacklist temporária")
+                if idx < len(available_operations) - 1:
+                    logging.warning(f"[OperationManager] ⚠️ Tentando fallback '{available_operations[idx+1].op_id}'...")
+                else:
+                    logging.warning(f"[OperationManager] ⚠️ Sem mais fallbacks disponíveis")
+                continue
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Erros que devem fazer fallback (temporários ou recuperáveis)
+                should_fallback = False
+                is_rate_limit = False
+                
+                # Rate limit (429)
+                if "429" in str(e) or "rate limit" in error_str or "rate_limit" in error_str:
+                    should_fallback = True
+                    is_rate_limit = True
+                # Erros de servidor (500, 502, 503, 504)
+                elif any(code in str(e) for code in ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]):
+                    should_fallback = True
+                # Timeout errors
+                elif "timeout" in error_str or "timed out" in error_str:
+                    should_fallback = True
+                # Connection errors
+                elif any(term in error_str for term in ["connection", "network", "unreachable", "refused"]):
+                    should_fallback = True
+                
+                if should_fallback:
+                    last_error = e
+                    tried_operations.append(op.op_id)
+                    if is_rate_limit:
+                        # Adicionar à blacklist temporária apenas para rate limit
+                        self.t2t_rate_limited.add(op.op_id)
+                        logging.warning(f"[OperationManager] ⚠️ Rate limit atingido para T2T '{op.op_id}', adicionando à blacklist temporária")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Erro temporário para T2T '{op.op_id}': {type(e).__name__}")
+                    if idx < len(available_operations) - 1:
+                        logging.warning(f"[OperationManager] ⚠️ Tentando fallback '{available_operations[idx+1].op_id}'...")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Sem mais fallbacks disponíveis")
+                    continue
+                else:
+                    # Para erros definitivos (401, 400, etc.), propaga imediatamente
+                    # Mas só se for a primeira operação, senão tenta fallback primeiro
+                    if idx == 0 and len(available_operations) > 1:
+                        # Se é a primeira e há fallback, tenta fallback mesmo para erros definitivos
+                        last_error = e
+                        tried_operations.append(op.op_id)
+                        logging.warning(f"[OperationManager] ⚠️ Erro para T2T '{op.op_id}': {type(e).__name__}, tentando fallback...")
+                        continue
+                    else:
+                        # Se não há fallback ou já tentou todos, propaga o erro
+                        raise
+        
+        # Se todas as operações falharam com rate limit, levanta o último erro
+        if last_error:
+            raise last_error
+        else:
+            raise OperationUnloaded("T2T")
+    
+    async def _use_mcp_with_fallback(self, chunk_in: Dict[str, Any], op_id: str = None):
+        '''Tenta usar uma operação mcp e, se falhar com rate limit, tenta a próxima'''
+        from openai import RateLimitError
+        
+        # Lista de todas as operações mcp disponíveis (principal + fallbacks)
+        mcp_operations = []
+        if self.mcp:
+            mcp_operations.append(self.mcp)
+        mcp_operations.extend(self.mcp_fallback)
+        
+        if not mcp_operations:
+            raise OperationUnloaded("MCP")
+        
+        # Se op_id foi especificado, filtra apenas a operação correspondente
+        if op_id:
+            mcp_operations = [op for op in mcp_operations if op.op_id == op_id]
+            if not mcp_operations:
+                raise OperationUnloaded("MCP", op_id=op_id)
+        
+        # Filtrar operações que estão com rate limit (pular direto para fallback)
+        available_operations = [op for op in mcp_operations if op.op_id not in self.mcp_rate_limited]
+        
+        # Se todas estão com rate limit, limpar blacklist e tentar novamente
+        if not available_operations:
+            logging.warning(f"[OperationManager] ⚠️ Todas as APIs MCP estão com rate limit, limpando blacklist e tentando novamente...")
+            self.mcp_rate_limited.clear()
+            available_operations = mcp_operations
+        
+        last_error = None
+        tried_operations = []
+        for idx, op in enumerate(available_operations):
+            try:
+                success = False
+                chunk_count = 0
+                async for chunk_out in op(chunk_in):
+                    success = True
+                    chunk_count += 1
+                    # Adicionar informação sobre qual API está sendo usada no chunk
+                    chunk_out['_mcp_op_id'] = op.op_id
+                    chunk_out['_mcp_op_idx'] = idx
+                    yield chunk_out
+                # Se chegou aqui, a operação foi bem-sucedida
+                if success:
+                    if idx > 0:
+                        # Se não era a primeira operação, houve fallback
+                        logging.info(f"[OperationManager] ✅ MCP fallback bem-sucedido: {tried_operations[0]} → {op.op_id}")
+                        print(f"[MCP] ⚠️ Fallback detectado: {tried_operations[0]} → {op.op_id} ({chunk_count} chunks)")
+                    return
+            except RateLimitError as e:
+                last_error = e
+                tried_operations.append(op.op_id)
+                # Adicionar à blacklist temporária
+                self.mcp_rate_limited.add(op.op_id)
+                logging.warning(f"[OperationManager] ⚠️ Rate limit atingido para MCP '{op.op_id}', adicionando à blacklist temporária")
+                if idx < len(available_operations) - 1:
+                    logging.warning(f"[OperationManager] ⚠️ Tentando fallback '{available_operations[idx+1].op_id}'...")
+                else:
+                    logging.warning(f"[OperationManager] ⚠️ Sem mais fallbacks disponíveis")
+                continue
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Erros que devem fazer fallback (temporários ou recuperáveis)
+                should_fallback = False
+                is_rate_limit = False
+                
+                # Rate limit (429)
+                if "429" in str(e) or "rate limit" in error_str or "rate_limit" in error_str:
+                    should_fallback = True
+                    is_rate_limit = True
+                # Erros de servidor (500, 502, 503, 504)
+                elif any(code in str(e) for code in ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]):
+                    should_fallback = True
+                # Timeout errors
+                elif "timeout" in error_str or "timed out" in error_str:
+                    should_fallback = True
+                # Connection errors
+                elif any(term in error_str for term in ["connection", "network", "unreachable", "refused"]):
+                    should_fallback = True
+                
+                if should_fallback:
+                    last_error = e
+                    tried_operations.append(op.op_id)
+                    if is_rate_limit:
+                        # Adicionar à blacklist temporária apenas para rate limit
+                        self.mcp_rate_limited.add(op.op_id)
+                        logging.warning(f"[OperationManager] ⚠️ Rate limit atingido para MCP '{op.op_id}', adicionando à blacklist temporária")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Erro temporário para MCP '{op.op_id}': {type(e).__name__}")
+                    if idx < len(available_operations) - 1:
+                        logging.warning(f"[OperationManager] ⚠️ Tentando fallback '{available_operations[idx+1].op_id}'...")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Sem mais fallbacks disponíveis")
+                    continue
+                else:
+                    # Para erros definitivos (401, 400, etc.), propaga imediatamente
+                    # Mas só se for a primeira operação, senão tenta fallback primeiro
+                    if idx == 0 and len(available_operations) > 1:
+                        # Se é a primeira e há fallback, tenta fallback mesmo para erros definitivos
+                        last_error = e
+                        tried_operations.append(op.op_id)
+                        logging.warning(f"[OperationManager] ⚠️ Erro para MCP '{op.op_id}': {type(e).__name__}, tentando fallback...")
+                        continue
+                    else:
+                        # Se não há fallback ou já tentou todos, propaga o erro
+                        raise
+        
+        # Se todas as operações falharam com rate limit, levanta o último erro
+        if last_error:
+            raise last_error
+        else:
+            raise OperationUnloaded("MCP")
+    
+    async def _use_vision_with_fallback(self, chunk_in: Dict[str, Any], op_id: str = None):
+        '''Tenta usar uma operação vision e, se falhar, tenta a próxima'''
+        # Lista de todas as operações vision disponíveis (principal + fallbacks)
+        vision_operations = []
+        if self.vision:
+            vision_operations.append(self.vision)
+        vision_operations.extend(self.vision_fallback)
+        
+        if not vision_operations:
+            raise OperationUnloaded("VISION")
+        
+        # Se op_id foi especificado, filtra apenas a operação correspondente
+        if op_id:
+            vision_operations = [op for op in vision_operations if op.op_id == op_id]
+            if not vision_operations:
+                raise OperationUnloaded("VISION", op_id=op_id)
+        
+        # Filtrar operações que estão com rate limit (pular direto para fallback)
+        available_operations = [op for op in vision_operations if op.op_id not in self.vision_rate_limited]
+        
+        # Se todas estão com rate limit, limpar blacklist e tentar novamente
+        if not available_operations:
+            logging.warning(f"[OperationManager] ⚠️ Todas as APIs Vision estão com rate limit, limpando blacklist e tentando novamente...")
+            self.vision_rate_limited.clear()
+            available_operations = vision_operations
+        
+        last_error = None
+        tried_operations = []
+        image_sent = False  # Flag para controlar se a imagem já foi enviada
+        
+        for idx, op in enumerate(available_operations):
+            try:
+                success = False
+                async for chunk_out in op(chunk_in):
+                    success = True
+                    
+                    # Adicionar informação sobre qual API está sendo usada
+                    chunk_out['_vision_op_id'] = op.op_id
+                    chunk_out['_vision_op_idx'] = idx
+                    
+                    # Se já enviamos a imagem e este chunk também tem imagem, pular o envio da imagem
+                    # (evitar duplicação durante fallback)
+                    if image_sent and chunk_out.get('image_bytes') and chunk_out.get('processing', False):
+                        # Já enviamos a imagem, não enviar novamente
+                        print(f"[Vision] ⚠️ Imagem já enviada, pulando envio duplicado da API {op.op_id}")
+                        # Mas ainda precisamos processar o chunk para obter a descrição
+                        # Remover image_bytes deste chunk para evitar duplicação
+                        chunk_out_no_image = chunk_out.copy()
+                        chunk_out_no_image.pop('image_bytes', None)
+                        # Se não há mais nada útil no chunk, pular
+                        if chunk_out_no_image.get('description') is None and not chunk_out_no_image.get('error'):
+                            continue
+                        yield chunk_out_no_image
+                    else:
+                        # Primeira vez ou chunk final com descrição
+                        if chunk_out.get('image_bytes') and chunk_out.get('processing', False):
+                            image_sent = True  # Marcar que imagem foi enviada
+                            print(f"[Vision] 📤 Enviando imagem da API {op.op_id}...")
+                        yield chunk_out
+                
+                # Se chegou aqui, a operação foi bem-sucedida
+                if success:
+                    if idx > 0:
+                        # Se não era a primeira operação, houve fallback
+                        print(f"[Vision] ✅ Fallback bem-sucedido: {tried_operations[0]} → {op.op_id}")
+                        logging.info(f"[OperationManager] ✅ Vision fallback bem-sucedido: {tried_operations[0]} → {op.op_id}")
+                    return
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Erros que devem fazer fallback (temporários, recuperáveis ou de autenticação)
+                should_fallback = False
+                is_rate_limit = False
+                is_auth_error = False
+                
+                # Rate limit (429)
+                if "429" in str(e) or "rate limit" in error_str or "rate_limit" in error_str:
+                    should_fallback = True
+                    is_rate_limit = True
+                # Erros de autenticação/autorização (401, 403) - fallback pode ter outra chave
+                elif any(code in str(e) for code in ["401", "403", "unauthorized", "forbidden"]):
+                    should_fallback = True
+                    is_auth_error = True
+                # Erros de servidor (500, 502, 503, 504)
+                elif any(code in str(e) for code in ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]):
+                    should_fallback = True
+                # Timeout errors (408, 504)
+                elif "408" in str(e) or "timeout" in error_str or "timed out" in error_str:
+                    should_fallback = True
+                # Connection errors
+                elif any(term in error_str for term in ["connection", "network", "unreachable", "refused"]):
+                    should_fallback = True
+                
+                if should_fallback:
+                    last_error = e
+                    tried_operations.append(op.op_id)
+                    if is_rate_limit or is_auth_error:
+                        # Adicionar à blacklist temporária para rate limit e erros de autenticação
+                        self.vision_rate_limited.add(op.op_id)
+                        if is_rate_limit:
+                            logging.warning(f"[OperationManager] ⚠️ Rate limit atingido para Vision '{op.op_id}', adicionando à blacklist temporária")
+                        else:
+                            logging.warning(f"[OperationManager] ⚠️ Erro de autenticação/autorização para Vision '{op.op_id}', adicionando à blacklist temporária")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Erro temporário para Vision '{op.op_id}': {type(e).__name__}")
+                    if idx < len(available_operations) - 1:
+                        logging.warning(f"[OperationManager] ⚠️ Tentando fallback '{available_operations[idx+1].op_id}'...")
+                    else:
+                        logging.warning(f"[OperationManager] ⚠️ Sem mais fallbacks disponíveis")
+                    continue
+                else:
+                    # Para outros erros (400, 404, etc.), tenta fallback se houver
+                    # Mas só se for a primeira operação, senão propaga
+                    if idx == 0 and len(available_operations) > 1:
+                        # Se é a primeira e há fallback, tenta fallback mesmo para erros definitivos
+                        last_error = e
+                        tried_operations.append(op.op_id)
+                        logging.warning(f"[OperationManager] ⚠️ Erro para Vision '{op.op_id}': {type(e).__name__}, tentando fallback...")
+                        continue
+                    else:
+                        # Se não há fallback ou já tentou todos, propaga o erro
+                        raise
+        
+        # Se todas as operações falharam, levanta o último erro
+        if last_error:
+            raise last_error
+        else:
+            raise OperationUnloaded("VISION")
             
     def use_operation(
         self,
@@ -501,19 +998,9 @@ class OperationManager(metaclass=Singleton):
                 
                 return self.stt(chunk_in)
             case OpRoles.MCP:
-                if not self.mcp:
-                    raise OperationUnloaded("MCP")
-                elif op_id and self.mcp and self.mcp.op_id != op_id:
-                    raise OperationUnloaded("MCP", op_id=op_id)
-                
-                return self.mcp(chunk_in)
+                return self._use_mcp_with_fallback(chunk_in, op_id)
             case OpRoles.T2T:
-                if not self.t2t:
-                    raise OperationUnloaded("T2T")
-                elif op_id and self.t2t and self.t2t.op_id != op_id:
-                    raise OperationUnloaded("T2T", op_id=op_id)
-                
-                return self.t2t(chunk_in)
+                return self._use_t2t_with_fallback(chunk_in, op_id)
             case OpRoles.TTS:
                 if not self.tts:
                     raise OperationUnloaded("TTS")
@@ -545,12 +1032,7 @@ class OperationManager(metaclass=Singleton):
                 
                 return self.embedding(chunk_in)
             case OpRoles.VISION:
-                if not self.vision:
-                    raise OperationUnloaded("VISION")
-                elif op_id and self.vision and self.vision.op_id != op_id:
-                    raise OperationUnloaded("VISION", op_id=op_id)
-                
-                return self.vision(chunk_in)
+                return self._use_vision_with_fallback(chunk_in, op_id)
             case _:
                 # Should never get here if op_role is indeed OpRoles
                 raise UnknownOpRole(op_role)

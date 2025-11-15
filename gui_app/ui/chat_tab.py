@@ -24,10 +24,11 @@ class ChatTab(QtWidgets.QWidget):
         hbox_chat_header.addWidget(self.btn_clear_chat, 0)
         hbox_chat_header.addStretch(1)
         
-        self.chat_history = QtWidgets.QPlainTextEdit()
+        # Use QTextEdit instead of QPlainTextEdit to support images
+        self.chat_history = QtWidgets.QTextEdit()
         self.chat_history.setReadOnly(True)
         # Enable word wrap to prevent UI stretching with long messages
-        self.chat_history.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.chat_history.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
         self.chat_history.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         
         hbox_text = QtWidgets.QHBoxLayout()

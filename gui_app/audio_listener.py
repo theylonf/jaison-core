@@ -11,6 +11,7 @@ class AudioListener(QtCore.QThread):
     text_received = QtCore.Signal(str, str)  # text, user_name
     image_received = QtCore.Signal(str, str, str, str)  # image_bytes_b64, user_name, image_format, error
     error_received = QtCore.Signal(str)  # error message
+    connection_closed = QtCore.Signal()  # signal when WebSocket connection closes unexpectedly
 
     def __init__(self, ws_url: str):
         super().__init__()
@@ -145,7 +146,10 @@ class AudioListener(QtCore.QThread):
                             if event_type == "response" and finished:
                                 # Only emit audio_complete if successful
                                 if success is not False:
+                                    print(f"[AudioListener] ✅ Emitindo audio_complete: finished={finished}, success={success}, sr={self.current_audio_sr}, sw={self.current_audio_sw}, ch={self.current_audio_ch}")
                                     self.audio_complete.emit(self.current_audio_sr, self.current_audio_sw, self.current_audio_ch)
+                                else:
+                                    print(f"[AudioListener] ⚠️ Job finalizado mas success={success}, não emitindo audio_complete")
                             
                             # Also check for "response_success" event type (legacy)
                             elif event_type == "response_success":
@@ -164,6 +168,11 @@ class AudioListener(QtCore.QThread):
                             # Timeout é normal, apenas continua aguardando
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
+                            print(f"[AudioListener] ⚠️ Conexão WebSocket fechada: {e}")
+                            print("[AudioListener] ⚠️ Isso pode indicar que o servidor fechou a conexão antes de completar o job")
+                            print("[AudioListener] ⚠️ Tentando montar áudio do buffer como fallback...")
+                            # Emit signal para tentar montar áudio do buffer como fallback
+                            self.connection_closed.emit()
                             break
                         except json.JSONDecodeError as e:
                             continue

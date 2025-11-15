@@ -66,6 +66,7 @@ name_translations:
     - [Fish](#fish)
     - [Kobold](#kobold)
     - [OpenAI](#openai)
+    - [Perplexity](#perplexity)
     - [RVC](#rvc)
 
 - [stt](#stt)
@@ -76,6 +77,7 @@ name_translations:
 - [t2t](#t2t)
     - [kobold](#kobold-2)
     - [openai](#openai-2)
+    - [perplexity](#perplexity-1)
 - [tts/mcp](#tts/mcp)
     - [azure](#azure-2)
     - [fish](#fish-2)
@@ -111,6 +113,23 @@ operations:
 ```
 
 This loads `fish` for `STT`, `openai` for `T2T`, all of `filter_clean` and `chunker_sentence` for `filter_text`, and `azure` for `TTS`. These are loaded in order. Filters are applied in the order they were loaded, with the earliest applying first before the rest. For non-filter operations, only one can be specified, otherwise older ones are overwritten.
+
+**Fallback System for T2T and MCP:** Multiple T2T or MCP operations can be configured to automatically fallback when rate limits are reached. Use `default: true` to explicitly mark which operation is the default one. If no operation is marked as default, the first one listed in the config file becomes the default. Subsequent operations are used as fallbacks in the order they appear. When a rate limit error (429) occurs, the system automatically tries the next configured API, passing the full history and prompts. This works for both T2T and MCP operations.
+
+Example:
+```yaml
+operations:
+- role: t2t
+  id: openai
+  default: true  # Esta é a padrão
+  base_url: https://api.openai.com/v1/
+  model: gpt-4o
+- role: t2t
+  id: perplexity
+  # Esta será usada como fallback se openai falhar
+  base_url: https://api.perplexity.ai
+  model: sonar-pro
+```
 
 Each operation may have its own configuration depending on the specific operation. For example:
 
@@ -199,6 +218,19 @@ To use OpenAI (not some other OpenAI-like API), you will need an API key. If you
 9. Paste what you just copied into `OPENAI_API_KEY` after the "="
 
 For other OpenAI-like APIs, they generally have their own setup instructions. Usually this involves replacing the API key above with theirs. You will additionally need to update the base URL inside this project's configuration file. These are listed as `openai_t2t_base_url` for example. Each of `STT`, `T2T`, and `TTS` have separately configurable base URLs.
+
+##### Perplexity
+
+To use Perplexity AI, you will need an API key.
+
+1. Go to [Perplexity AI Account](https://perplexity.ai/account/api)
+2. Make an account or sign in
+3. Navigate to the **API Keys** tab
+4. Generate a new API key
+5. In the main project, copy `.env-template` or one created prior
+6. Paste what you just copied into `PERPLEXITY_API_KEY` after the "="
+
+**Note:** Perplexity's API is compatible with OpenAI's Chat Completions format, so it can be used as a fallback when other APIs hit rate limits. See the [t2t section](#perplexity-1) for configuration details and the fallback system.
 
 ##### RVC
 
@@ -297,9 +329,41 @@ Configuration:
 - `base_url` (str) for specifying endpoint (OpenAI or some other application/service)
 - `model` (str) for model ID
 - `temperature` (float) for adjusting temperature
-- `top_p` (float) for adjusting top P
-- `presence_penalty` (float) for adjusting presence penalty
-- `frequency_penalty` (float) for adjusting frequency penalty
+- `top_p` (float) for nucleus sampling
+- `presence_penalty` (float) for presence penalty
+- `frequency_penalty` (float) for frequency penalty
+
+##### perplexity
+
+- **compatibility** -> all
+- **paid** -> yes
+
+Uses [Perplexity AI's service](https://docs.perplexity.ai/getting-started/quickstart), which is compatible with OpenAI's Chat Completions format. Perplexity provides AI models with web search capabilities.
+
+Configuration:
+- `base_url` (str) for specifying endpoint (default: `https://api.perplexity.ai`)
+- `model` (str) for model ID (e.g., `sonar-pro`, `sonar`)
+- `api_key` (str) for API key (optional, can use `PERPLEXITY_API_KEY` environment variable instead)
+- `temperature` (float) for adjusting temperature
+- `top_p` (float) for nucleus sampling
+- `presence_penalty` (float) for presence penalty
+- `frequency_penalty` (float) for frequency penalty
+
+**Fallback Usage:** Perplexity can be configured as a fallback API. When the primary T2T API hits a rate limit, the system automatically switches to Perplexity (or the next configured fallback) and passes the complete conversation history. Example configuration:
+
+```yaml
+operations:
+- role: t2t
+  id: openai
+  base_url: https://api.openai.com/v1/
+  model: gpt-4o
+  # ... other config
+- role: t2t
+  id: perplexity
+  base_url: https://api.perplexity.ai
+  model: sonar-pro
+  # Will be used automatically if openai hits rate limit
+```
 
 #### tts
 

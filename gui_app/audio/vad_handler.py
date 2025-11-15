@@ -192,11 +192,17 @@ class VADHandler:
                 self._last_rms_log_time = current_time
             
             if rms_scaled > self.voice_threshold:
+                # Always reset silence timer when voice is detected (even if already speaking)
+                # This prevents the timer from continuing if user resumes speaking
+                if self.silence_start_time is not None:
+                    self.silence_start_time = None
+                    self._auto_send_scheduled = False
+                    if self.on_log:
+                        self.on_log(f"[VAD] 🎤 Voz detectada novamente! Resetando timer de silêncio. RMS: {rms_scaled} > Threshold: {self.voice_threshold}")
+                
                 if not self.is_speaking:
                     self.is_speaking = True
-                    self.silence_start_time = None
                     self.current_phrase_audio = []
-                    self._auto_send_scheduled = False
                     if self.on_log:
                         self.on_log(f"[VAD] 🎤 Voz detectada! RMS: {rms_scaled} > Threshold: {self.voice_threshold}")
                     if self.on_voice_detected:

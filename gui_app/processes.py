@@ -72,3 +72,6 @@ class LogReader(QtCore.QThread):
 
 
 
+
+
+

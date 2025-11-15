@@ -57,6 +57,7 @@ class ChatHandler:
         self.audio_listener.text_received.connect(self._on_text_received)
         self.audio_listener.image_received.connect(self._on_image_received)
         self.audio_listener.error_received.connect(self._on_error_received)
+        self.audio_listener.connection_closed.connect(self._on_connection_closed)
         self.audio_listener.start()
         
         if self.on_log:
@@ -91,6 +92,7 @@ class ChatHandler:
     
     def _on_audio_complete(self, sr: int, sw: int, ch: int):
         """Handle audio completion signal."""
+        print(f"[ChatHandler] _on_audio_complete recebido: buffer tem {len(self.audio_chunks_buffer)} chunks, sr={sr}, sw={sw}, ch={ch}")
         if self.audio_chunks_buffer:
             # Use stored parameters if provided ones are default
             if sr == 16000 and self.last_ai_audio_sr != 16000:
@@ -98,16 +100,35 @@ class ChatHandler:
                 sw = self.last_ai_audio_sw
                 ch = self.last_ai_audio_ch
             
+            print(f"[ChatHandler] Chamando on_audio_complete callback (sr={sr}, sw={sw}, ch={ch})")
             if self.on_audio_complete:
                 self.on_audio_complete(sr, sw, ch)
+            else:
+                print("[ChatHandler] ⚠️ on_audio_complete callback não está definido!")
         else:
+            error_msg = "⚠️ Buffer vazio quando evento de conclusão chegou!"
             if self.on_log:
-                self.on_log("⚠️ Buffer vazio quando evento de conclusão chegou!")
+                self.on_log(error_msg)
+            print(f"[ChatHandler] {error_msg}")
     
     def _on_text_received(self, text: str):
         """Handle text received from server."""
         if text.strip() and self.on_text_received:
             self.on_text_received(text)
+    
+    def _on_connection_closed(self):
+        """Handle WebSocket connection closed unexpectedly."""
+        print(f"[ChatHandler] Conexão WebSocket fechada, verificando se há áudio no buffer para montar...")
+        # Se há chunks no buffer, tenta montar como fallback
+        if self.audio_chunks_buffer:
+            print(f"[ChatHandler] Buffer tem {len(self.audio_chunks_buffer)} chunks, tentando montar como fallback")
+            if self.on_audio_complete:
+                # Usa os parâmetros armazenados
+                self.on_audio_complete(self.last_ai_audio_sr, self.last_ai_audio_sw, self.last_ai_audio_ch)
+            else:
+                print("[ChatHandler] ⚠️ on_audio_complete callback não está definido!")
+        else:
+            print("[ChatHandler] Buffer vazio, nada para montar")
     
     def _on_image_received(self, image_bytes_b64: str, user_name: str, image_format: str, error: str):
         """Handle image received from server."""

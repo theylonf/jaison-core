@@ -17,26 +17,41 @@ class AudioPlayer:
         self.last_ai_audio_sw = 2
         self.last_ai_audio_ch = 1
         
+        self._current_playback = None  # Thread atual de reprodução
+        self._is_playing = False  # Flag para indicar se está tocando
+        
         self.on_log: Optional[Callable] = None
     
     def play_audio(self, audio_array: np.ndarray, sr: int, sw: int = 2, ch: int = 1, on_complete=None):
         """Play audio array."""
+        # Se já está tocando, para o áudio anterior antes de tocar o novo
+        # Isso evita sobreposição de áudios
+        if self._is_playing:
+            try:
+                sd.stop()
+            except:
+                pass
+        
         def play_thread():
+            self._is_playing = True
             try:
                 if self.audio_output_device is not None:
                     sd.play(audio_array, samplerate=sr, device=self.audio_output_device)
                 else:
                     sd.play(audio_array, samplerate=sr)
                 sd.wait()
+                self._is_playing = False
                 if on_complete:
                     on_complete()
             except Exception as e:
+                self._is_playing = False
                 if self.on_log:
                     self.on_log(f"Erro ao reproduzir áudio: {e}")
                 if on_complete:
                     on_complete()
         
-        threading.Thread(target=play_thread, daemon=True).start()
+        self._current_playback = threading.Thread(target=play_thread, daemon=True)
+        self._current_playback.start()
     
     def play_audio_bytes(self, audio_bytes: bytes, sr: int, sw: int = 2, ch: int = 1, on_complete=None):
         """Play audio from bytes."""

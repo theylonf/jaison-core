@@ -281,20 +281,35 @@ Below is a list of descriptions for all available tool:\n
             
     async def use(self, tooling_response: str):
         tool_calls = tooling_response.split("\n")
-        
         result_list = list()
         
-        for tool_call in tool_calls:
+        for idx, tool_call in enumerate(tool_calls):
             result = None
             tool_name = ""
             try:
                 match = self.pattern.search(tool_call)
-                if match is None: continue
+                if match is None:
+                    continue
+                
                 name_token = tool_call[:match.span()[1]]
                 tool_name = name_token.lstrip("<").rstrip(">")
-                if name_token == "no_op": continue
+                
+                if name_token == "no_op":
+                    continue
+                
                 tool_call = tool_call[match.span()[1]:].rstrip(" ")
-                input_json = json.loads(tool_call) if len(tool_call) else dict()
+                
+                # Tentar fazer parse do JSON, mas tratar erros graciosamente
+                input_json = dict()
+                if len(tool_call):
+                    try:
+                        input_json = json.loads(tool_call)
+                    except json.JSONDecodeError as json_error:
+                        # Se não for JSON válido, logar e continuar com dict vazio
+                        print(f"[MCP] ⚠️ Erro ao parsear JSON do tool '{tool_name}': {str(json_error)[:100]}")
+                        print(f"[MCP]    Conteúdo: {repr(tool_call[:150])}")
+                        # Tentar continuar com dict vazio ao invés de quebrar
+                        input_json = dict()
                 
                 tool = {
                     "name": name_token,
@@ -325,15 +340,14 @@ Below is a list of descriptions for all available tool:\n
                             if isinstance(tool['input'][key], str):
                                 urllib.parse.quote(tool['input'][key])
                                 tool['input'][key] = urllib.parse.quote(tool['input'][key])
-                        logging.debug("Calling resource: {} {} {}".format(tool_name, tool['input'], uri_template))
-                        logging.debug(uri_template.format(**tool['input']))
                         result = await self.clients[client].session.read_resource(
                             uri_template.format(**tool['input'])
                         )
                         result = parse_tool_result(result.contents[0])
                         break
             except Exception as err:
-                logging.critical("Error occured during MCP", exc_info=True)
+                print(f"[MCP] ❌ Erro ao processar tool '{tool_name}': {type(err).__name__} - {str(err)[:200]}")
+                logging.critical(f"[MCP] Erro completo:", exc_info=True)
                 result = "Attempt to use MCP tool failed due to {}".format(str(err))
             if result:
                 result_list.append((tool_name, result))

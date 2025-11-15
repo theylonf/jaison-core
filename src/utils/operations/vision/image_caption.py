@@ -42,11 +42,9 @@ class ImageCaptionService:
                 max_width = 1024
                 max_height = 768
                 original_size = len(image_bytes)
-                print(f"[Vision] Imagem original: {img.width}x{img.height}, {original_size} bytes")
                 
                 if img.width > max_width or img.height > max_height:
                     img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-                    print(f"[Vision] Imagem redimensionada para: {img.width}x{img.height}")
                 
                 # Convert to RGB if necessary (for JPEG)
                 if img.mode in ('RGBA', 'LA', 'P'):
@@ -68,7 +66,6 @@ class ImageCaptionService:
                     test_bytes = output.getvalue()
                     if len(test_bytes) < 200000:  # 200KB raw
                         compressed_bytes = test_bytes
-                        print(f"[Vision] Qualidade {quality} atingiu tamanho desejado: {len(test_bytes)} bytes")
                         break
                 
                 # If still too large, use lowest quality and further resize
@@ -76,18 +73,16 @@ class ImageCaptionService:
                     # Resize even more aggressively
                     if img.width > 800 or img.height > 600:
                         img.thumbnail((800, 600), Image.Resampling.LANCZOS)
-                        print(f"[Vision] Redimensionamento adicional para: {img.width}x{img.height}")
                     
                     output = BytesIO()
                     img.save(output, format='JPEG', quality=35, optimize=True)
                     compressed_bytes = output.getvalue()
-                    print(f"[Vision] Usando qualidade mínima (35): {len(compressed_bytes)} bytes")
                 
-                # Log compression ratio
+                # Log compression ratio (apenas se houver redução significativa)
                 compressed_size = len(compressed_bytes)
-                compression_ratio = (1 - compressed_size / original_size) * 100
-                base64_size = len(base64.b64encode(compressed_bytes).decode('utf-8'))
-                print(f"[Vision] Imagem comprimida: {original_size} bytes -> {compressed_size} bytes ({compression_ratio:.1f}% redução, base64: {base64_size} bytes)")
+                if compressed_size < original_size * 0.9:  # Se reduziu mais de 10%
+                    compression_ratio = (1 - compressed_size / original_size) * 100
+                    print(f"[Vision] 📦 Comprimido: {original_size} → {compressed_size} bytes ({compression_ratio:.1f}% redução)")
                 
                 image_bytes = compressed_bytes
             except Exception as e:
@@ -128,10 +123,30 @@ class ImageCaptionService:
                         return None
                 else:
                     error_text = response.text
-                    print(f"Erro na API de reconhecimento de imagem: {response.status_code} - {error_text}")
+                    status_code = response.status_code
+                    
+                    # Para erros que devem acionar fallback (outra API pode ter chave diferente)
+                    # Erros temporários: 429 (rate limit), 500, 502, 503, 504 (erros de servidor)
+                    # Erros de timeout: 408, 504
+                    # Erros de autenticação/autorização: 401, 403 (chave inválida/sem permissão - fallback pode ter outra chave)
+                    # Erros de serviço indisponível: 503
+                    if status_code in [401, 403, 408, 429, 500, 502, 503, 504]:
+                        error_msg = f"Erro {status_code}: {error_text[:100]}"
+                        print(f"[Vision] ❌ RapidAPI falhou: {error_msg}")
+                        # Criar exceção para acionar fallback
+                        raise Exception(error_msg)
+                    
+                    # Para outros erros (400, 404, etc.), retornar None
+                    print(f"[Vision] ⚠️ RapidAPI retornou {status_code}: {error_text[:100]}")
                     return None
                     
         except Exception as e:
+            # Se a exceção já foi lançada para erro temporário, propagar
+            error_str = str(e).lower()
+            if "erro temporário" in error_str or "500" in str(e) or "502" in str(e) or "503" in str(e) or "504" in str(e):
+                # Re-lançar exceção para acionar fallback
+                raise
+            # Para outros erros, apenas logar e retornar None
             print(f"Erro ao processar imagem: {e}")
             import traceback
             traceback.print_exc()

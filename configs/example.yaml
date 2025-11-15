@@ -32,14 +32,29 @@ operations:
 #   top_k: 100
 #   top_p: 0.9
 #   typical: 1
+# T2T - Múltiplas APIs podem ser configuradas para fallback automático
+# Quando uma API atinge rate limit, o sistema tenta automaticamente a próxima
+# Use 'default: true' para indicar qual é a padrão, ou a primeira será a padrão
 - role: t2t
   id: openai
+  default: true  # Indica que esta é a operação padrão
   base_url: https://api.openai.com/v1/
   model: gpt-4o
   temperature: 1
   top_p: 0.9
   presence_penalty: 1
   frequency_penalty: 1
+# Fallback para Perplexity (será usado automaticamente se openai atingir rate limit)
+# Descomente as linhas abaixo e configure PERPLEXITY_API_KEY no arquivo .env
+# - role: t2t
+#   id: perplexity
+#   base_url: https://api.perplexity.ai
+#   model: sonar-pro
+#   temperature: 1
+#   top_p: 0.9
+#   presence_penalty: 0
+#   frequency_penalty: 0
+#   # api_key é opcional se PERPLEXITY_API_KEY estiver configurada no .env
 
   # Text filters
 - role: filter_text

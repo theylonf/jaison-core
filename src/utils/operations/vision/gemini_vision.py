@@ -94,24 +94,42 @@ class GeminiVision(VisionOperation):
             }
             return
         
-        # Get caption from API
+        # Enviar imagem imediatamente após captura (antes de chamar API)
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        yield {
+            "description": None,  # Ainda não temos a descrição
+            "image_bytes": image_base64,
+            "image_format": "png",
+            "processing": True  # Indica que ainda está processando
+        }
+        
+        # Get caption from API (pode demorar)
         description = None
         if self.caption_service:
-            description = await self.caption_service.caption_image(image_bytes)
+            try:
+                description = await self.caption_service.caption_image(image_bytes)
+            except Exception as api_error:
+                # Se a API lançou exceção (erro temporário), propagar para acionar fallback
+                # A imagem já foi enviada, então não precisamos fazer nada aqui
+                # A exceção será capturada pelo fallback handler
+                raise
         else:
             yield {
                 "error": "Serviço Gemini não inicializado. Verifique se GEMINI_API_KEY está configurada.",
                 "description": None,
-                "image_bytes": base64.b64encode(image_bytes).decode('utf-8') if image_bytes else None,
-                "image_format": "png"
+                "image_bytes": image_base64,
+                "image_format": "png",
+                "processing": False
             }
             return
         
-        # Return result
+        # Se chegou aqui sem exceção mas description é None, pode ser erro definitivo
+        # Mas ainda assim retornamos o resultado para não quebrar o fluxo
         result = {
             "description": description,
-            "image_bytes": base64.b64encode(image_bytes).decode('utf-8') if image_bytes else None,
-            "image_format": "png"
+            "image_bytes": image_base64,  # Manter a mesma imagem
+            "image_format": "png",
+            "processing": False  # Processamento concluído
         }
         
         if not description:

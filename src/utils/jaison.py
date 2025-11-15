@@ -267,8 +267,32 @@ class JAIson(metaclass=Singleton):
             self.prompter.add_mcp_usage_prompt(self.mcp_manager.get_tooling_prompt(), self.mcp_manager.get_response_prompt())
             mcp_sys_prompt, mcp_user_prompt = self.prompter.generate_mcp_system_context(), self.prompter.generate_mcp_user_context()
             tooling_response = ""
+            mcp_op_ids = set()  # Rastrear quais APIs foram usadas
+            first_chunk = True
+            
             async for chunk in self.op_manager.use_operation(OpRoles.MCP, {"instruction_prompt": mcp_sys_prompt, "messages": [RawMessage(mcp_user_prompt)]}):
+                if first_chunk:
+                    # Print logo no primeiro chunk recebido
+                    op_id = chunk.get('_mcp_op_id', 'unknown')
+                    print(f"[MCP] Processando... (API: {op_id})")
+                    first_chunk = False
+                
                 tooling_response += chunk['content']
+                # Rastrear qual API está sendo usada (adicionado pelo fallback handler)
+                if '_mcp_op_id' in chunk:
+                    mcp_op_ids.add(chunk['_mcp_op_id'])
+            
+            if tooling_response.strip():
+                # Verificar se há múltiplas respostas concatenadas (possível fallback)
+                tool_lines = [line for line in tooling_response.split('\n') if line.strip().startswith('<')]
+                op_info = ""
+                if len(mcp_op_ids) > 1:
+                    op_info = f" (APIs: {', '.join(sorted(mcp_op_ids))})"
+                elif len(mcp_op_ids) == 1:
+                    op_info = f" (API: {list(mcp_op_ids)[0]})"
+                if tool_lines:
+                    op_info += f" - {len(tool_lines)} tool calls"
+                print(f"[MCP] Resposta{op_info}: {repr(tooling_response[:150])}")
 
             ## Perform MCP tool calls
             tool_call_results = await self.mcp_manager.use(tooling_response)
@@ -422,46 +446,70 @@ class JAIson(metaclass=Singleton):
                 async for chunk in self.op_manager.use_operation(OpRoles.FILTER_TEXT, {"content": content}, op_id="vision_trigger"):
                     if chunk.get('vision_triggered'):
                         vision_triggered = True
-                        # Use VISION operation to capture and analyze
-                        # Pass vision_use_mouse_area from filter chunk
-                        import logging
-                        logging.info(f"[Vision] Vision triggered! Content: {content[:100]}, use_mouse_area: {chunk.get('vision_use_mouse_area', False)}")
+                        print(f"[Vision] 🔍 Triggered! use_mouse_area={chunk.get('vision_use_mouse_area', False)}")
                         # Use VISION operation to capture and analyze
                         # Pass vision_use_mouse_area from filter chunk
                         vision_op = self.op_manager.get_operation(OpRoles.VISION)
                         if vision_op:
                             use_mouse_area = chunk.get('vision_use_mouse_area', False)
-                            async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
-                                "screenshot_requested": True,
-                                "vision_use_mouse_area": use_mouse_area
-                            }):
-                                vision_result = vision_chunk
-                                # Broadcast screenshot image to GUI (even if capture failed, send error info)
-                                image_bytes = vision_chunk.get('image_bytes')
-                                if image_bytes:
-                                    logging.info(f"[Vision] Screenshot capturado com sucesso (tamanho: {len(image_bytes)} bytes)")
-                                    await self._handle_broadcast_event(job_id, job_type, {
-                                        "event_type": "vision_screenshot",
-                                        "image_bytes": image_bytes,
-                                        "image_format": vision_chunk.get('image_format', 'png'),
-                                        "user": user,
-                                        "timestamp": timestamp
-                                    })
-                                else:
-                                    error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
-                                    logging.warning(f"[Vision] Falha ao capturar screenshot: {error_msg}")
-                                    # Ainda assim, enviar evento para informar a GUI sobre o erro
-                                    await self._handle_broadcast_event(job_id, job_type, {
-                                        "event_type": "vision_screenshot",
-                                        "image_bytes": None,
-                                        "image_format": "png",
-                                        "error": error_msg,
-                                        "user": user,
-                                        "timestamp": timestamp
-                                    })
-                                break
+                            try:
+                                vision_api_used = None
+                                # Coletar todos os chunks do Vision (pode ter fallback)
+                                async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
+                                    "screenshot_requested": True,
+                                    "vision_use_mouse_area": use_mouse_area
+                                }):
+                                    # Rastrear qual API está sendo usada
+                                    if '_vision_op_id' in vision_chunk:
+                                        vision_api_used = vision_chunk['_vision_op_id']
+                                    
+                                    # Atualizar vision_result com o último chunk válido
+                                    if vision_chunk:
+                                        vision_result = vision_chunk
+                                    
+                                    # Broadcast screenshot image to GUI imediatamente quando disponível
+                                    image_bytes = vision_chunk.get('image_bytes')
+                                    is_processing = vision_chunk.get('processing', False)
+                                    
+                                    if image_bytes:
+                                        # Enviar imagem imediatamente (mesmo se ainda estiver processando)
+                                        api_info = f" ({vision_api_used})" if vision_api_used else ""
+                                        print(f"[Vision] 📸 Imagem capturada{api_info}: {len(image_bytes)} bytes - Enviando para chat...")
+                                        await self._handle_broadcast_event(job_id, job_type, {
+                                            "event_type": "vision_screenshot",
+                                            "image_bytes": image_bytes,
+                                            "image_format": vision_chunk.get('image_format', 'png'),
+                                            "user": user,
+                                            "timestamp": timestamp,
+                                            "processing": is_processing  # Indica se ainda está processando
+                                        })
+                                        print(f"[Vision] ✅ Imagem enviada para o chat")
+                                    else:
+                                        error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
+                                        print(f"[Vision] ❌ Erro ao capturar: {error_msg}")
+                                        # Ainda assim, enviar evento para informar a GUI sobre o erro
+                                        await self._handle_broadcast_event(job_id, job_type, {
+                                            "event_type": "vision_screenshot",
+                                            "image_bytes": None,
+                                            "image_format": "png",
+                                            "error": error_msg,
+                                            "user": user,
+                                            "timestamp": timestamp
+                                        })
+                                
+                                # Mostrar resultado final
+                                if vision_result and vision_result.get('description'):
+                                    desc = vision_result.get('description', '')[:100]
+                                    print(f"[Vision] ✅ Descrição obtida: {desc}...")
+                                elif vision_result and vision_result.get('error'):
+                                    print(f"[Vision] ⚠️ Erro final: {vision_result.get('error')}")
+                            except Exception as vision_error:
+                                print(f"[Vision] ❌ Erro ao processar: {type(vision_error).__name__} - {str(vision_error)[:200]}")
+                                logging.error(f"[Vision] Erro completo:", exc_info=True)
+                                # Mesmo com erro, tenta continuar sem visão
+                                vision_result = None
                         else:
-                            logging.warning("[Vision] Vision operation não está carregada")
+                            print(f"[Vision] ⚠️ Vision operation não está carregada")
                         break
             except Exception as e:
                 # Se vision_trigger não estiver carregado, continua sem visão
@@ -532,35 +580,47 @@ class JAIson(metaclass=Singleton):
                         vision_op = self.op_manager.get_operation(OpRoles.VISION)
                         if vision_op:
                             use_mouse_area = chunk.get('vision_use_mouse_area', False)
-                            async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
-                                "screenshot_requested": True,
-                                "vision_use_mouse_area": use_mouse_area
-                            }):
-                                vision_result = vision_chunk
-                                # Broadcast screenshot image to GUI (even if capture failed, send error info)
-                                image_bytes = vision_chunk.get('image_bytes')
-                                if image_bytes:
-                                    logging.info(f"[Vision] Screenshot capturado com sucesso (tamanho: {len(image_bytes)} bytes)")
-                                    await self._handle_broadcast_event(job_id, job_type, {
-                                        "event_type": "vision_screenshot",
-                                        "image_bytes": image_bytes,
-                                        "image_format": vision_chunk.get('image_format', 'png'),
-                                        "user": user,
-                                        "timestamp": timestamp
-                                    })
-                                else:
-                                    error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
-                                    logging.warning(f"[Vision] Falha ao capturar screenshot: {error_msg}")
-                                    # Ainda assim, enviar evento para informar a GUI sobre o erro
-                                    await self._handle_broadcast_event(job_id, job_type, {
-                                        "event_type": "vision_screenshot",
-                                        "image_bytes": None,
-                                        "image_format": "png",
-                                        "error": error_msg,
-                                        "user": user,
-                                        "timestamp": timestamp
-                                    })
-                                break
+                            try:
+                                # Coletar todos os chunks do Vision (pode ter fallback)
+                                async for vision_chunk in self.op_manager.use_operation(OpRoles.VISION, {
+                                    "screenshot_requested": True,
+                                    "vision_use_mouse_area": use_mouse_area
+                                }):
+                                    # Atualizar vision_result com o último chunk válido
+                                    if vision_chunk:
+                                        vision_result = vision_chunk
+                                    
+                                    # Broadcast screenshot image to GUI imediatamente quando disponível
+                                    image_bytes = vision_chunk.get('image_bytes')
+                                    is_processing = vision_chunk.get('processing', False)
+                                    
+                                    if image_bytes:
+                                        # Enviar imagem imediatamente (mesmo se ainda estiver processando)
+                                        logging.info(f"[Vision] Screenshot capturado com sucesso (tamanho: {len(image_bytes)} bytes)")
+                                        await self._handle_broadcast_event(job_id, job_type, {
+                                            "event_type": "vision_screenshot",
+                                            "image_bytes": image_bytes,
+                                            "image_format": vision_chunk.get('image_format', 'png'),
+                                            "user": user,
+                                            "timestamp": timestamp,
+                                            "processing": is_processing  # Indica se ainda está processando
+                                        })
+                                    else:
+                                        error_msg = vision_chunk.get('error', 'Falha desconhecida na captura')
+                                        logging.warning(f"[Vision] Falha ao capturar screenshot: {error_msg}")
+                                        # Ainda assim, enviar evento para informar a GUI sobre o erro
+                                        await self._handle_broadcast_event(job_id, job_type, {
+                                            "event_type": "vision_screenshot",
+                                            "image_bytes": None,
+                                            "image_format": "png",
+                                            "error": error_msg,
+                                            "user": user,
+                                            "timestamp": timestamp
+                                        })
+                            except Exception as vision_error:
+                                logging.error(f"[Vision] Erro ao processar visão: {vision_error}")
+                                # Mesmo com erro, tenta continuar sem visão
+                                vision_result = None
                         else:
                             logging.warning("[Vision] Vision operation não está carregada")
                         break
